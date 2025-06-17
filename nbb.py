@@ -10,7 +10,7 @@ class EssenceNet(nn.Module):
         self.comp_feat_blocks = nn.ModuleList([
             # 3x3 픽셀 단위 특징 검출
             # 정보가 혼재된 노이즈 신호
-            self._double_conv_block(2, 32, 16, 3, 2, 1),  # 320x320 -> 160x160
+            self._double_conv_block(3, 32, 16, 3, 2, 1),  # 320x320 -> 160x160
             # 7x7 픽셀 단위 특징 검출
             # 노이즈 + 점의 의미
             self._double_conv_block(16, 64, 64, 3, 2, 1),  # 160x160 -> 80x80
@@ -33,17 +33,23 @@ class EssenceNet(nn.Module):
             self._double_conv_block(256, 512, 512, 3, 1, 0)  # 3x3 -> 1x1
         ])
 
-        self.register_buffer('scharr_x', torch.tensor(
-            [[-3., 0., 3.],
-             [-10., 0., 10.],
-             [-3., 0., 3.]]
-        ).view(1, 1, 3, 3))
-
-        self.register_buffer('scharr_y', torch.tensor(
-            [[-3., -10., -3.],
-             [0., 0., 0.],
-             [3., 10., 3.]]
-        ).view(1, 1, 3, 3))
+        # Scharr kernels
+        scharr_x = torch.tensor(
+            [[[-3., 0., 3.],
+              [-10., 0., 10.],
+              [-3., 0., 3.]]],
+            dtype=torch.float32
+        )
+        scharr_y = torch.tensor(
+            [[[-3., -10., -3.],
+              [0., 0., 0.],
+              [3., 10., 3.]]],
+            dtype=torch.float32
+        )
+        # 이름 ‘scharr_x’/‘scharr_y’ 로 버퍼 등록
+        self.register_buffer('scharr_x', scharr_x)
+        self.register_buffer('scharr_y', scharr_y)
+        # self.register_buffer('pi_const', torch.tensor(math.pi))
 
     def _single_conv_block(self, in_ch, out_ch, ks, strd, pdd):
         return nn.Sequential(
@@ -67,12 +73,29 @@ class EssenceNet(nn.Module):
         )
 
     def _apply_scharr_filter(self, gray_img):
-        device = gray_img.device
-        edge_x = F.conv2d(gray_img, self.scharr_x.to(device), padding=1)
-        edge_y = F.conv2d(gray_img, self.scharr_y.to(device), padding=1)
+        # buffer 로 올라간 커널은 model.to(device) 시 자동으로 이동/캐스팅됨
+        edge_x = F.conv2d(gray_img, self.scharr_x.unsqueeze(0), padding=1)
+        edge_y = F.conv2d(gray_img, self.scharr_y.unsqueeze(0), padding=1)
 
-        edge_magnitude = torch.tanh(torch.sqrt(edge_x ** 2 + edge_y ** 2 + 1e-6))
-        return edge_magnitude
+        # x/y 방향 에지 정규화: [-1, 1] → [0, 1]
+        edge_x_tanh = torch.tanh(edge_x)
+        edge_y_tanh = torch.tanh(edge_y)
+        edge_x_norm = (edge_x_tanh + 1) / 2
+        edge_y_norm = (edge_y_tanh + 1) / 2
+
+        # # 종합 세기
+        # # magnitude: hypot(x, y) → [0, 1]
+        # edge_magnitude = torch.hypot(edge_x, edge_y)
+        # edge_magnitude = edge_magnitude / (edge_magnitude.amax(dim=[1, 2, 3], keepdim=True) + 1e-6)
+        # edge_magnitude = edge_magnitude.clamp(0, 1)
+        #
+        # # 각도
+        # # angle: atan2(y, x) / π → [-1, 1] → [0, 1]
+        # edge_angle = torch.atan2(edge_y, edge_x)
+        # edge_angle_norm = (edge_angle / self.pi_const + 1) / 2  # → [0, 1]
+
+        # 수평 세기, 수직 세기
+        return edge_x_norm, edge_y_norm
 
     def forward(self, x):
         assert x.shape[1] == 3, "Input tensor must have 3 channels (RGB)."
@@ -89,12 +112,14 @@ class EssenceNet(nn.Module):
         gray_feats = (0.2989 * x[:, 0:1, :, :] + 0.5870 * x[:, 1:2, :, :] + 0.1140 * x[:, 2:3, :, :])
 
         # scharr 필터 적용 (에지 정보 전처리 1채널 추가, CNN 보다 가벼운 연산으로 외곽 특징 검출을 보조)
-        edge_feats = self._apply_scharr_filter(gray_feats)
-        # 에지 특징 저장(160x160)
-        result_feats_list.append(F.interpolate(edge_feats, scale_factor=0.5, mode='bilinear', align_corners=False))
+        edge_x, edge_y = self._apply_scharr_filter(gray_feats)
 
-        # 흑백 + Sobel 결합 (2채널)
-        x = torch.cat([gray_feats, edge_feats], dim=1)
+        # 에지 특징 저장(160x160)
+        for feat in (edge_x, edge_y):
+            result_feats_list.append(F.interpolate(feat, scale_factor=0.5, mode='bilinear', align_corners=False))
+
+        # 흑백 + 에지 특징 결합
+        x = torch.cat([gray_feats, edge_x, edge_y], dim=1)
 
         # 멀티 스케일 형태 정보 추출
         comp_feats_list = []
