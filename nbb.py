@@ -3,26 +3,32 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-# todo : 역치 개념을 적용하여 처음 n개 특징은 최종 특징에서 제외하기
 class EssenceNet(nn.Module):
     def __init__(self):
         super().__init__()
+        # 특징맵을 저장할 comp_feat_blocks 의 레이어 인덱스 리스트
+        # 초기 인덱스는 역치에 따라 저장하지 않을 수 있고, 일정 간격을 스킵하는 방식으로 저장할 수도 있음
+        self.save_feat_idx_list = [1, 2, 3, 4, 5, 6, 7]
+
+        # 추출할 특징 크기(클수록 표현력이 늘어나지만 self.save_feat_idx_list 의 개수와 곱하는 값 만큼 메모리 사용량이 늘어남)
+        self.comp_feats_ch = 32
 
         # 선(직선 + 곡선), 선명도, 질감, 도형 검출 (채널 크기 증량, 감축 가능)
         # 멀티 스케일 + 복합 형태 정보
         self.comp_feat_blocks = nn.ModuleList([
             # 처음은 3x3 픽셀 단위 특징 검출
-            self._double_conv_block(1, 32, 8, 3, 2, 1),  # 320x320 -> 160x160
+            self._double_conv_block(1, 512, self.comp_feats_ch, 3, 2, 1),  # 320x320 -> 160x160
             # 다음은 9x9 픽셀 단위 특징 검출(아직 질감 등은 추출 되지 않음)
-            self._double_conv_block(8, 64, 16, 3, 2, 1),  # 160x160 -> 80x80
+            # 여기부턴 커널 개수를 늘려도 됩니다. 최대는 512 * self.comp_feats_ch
+            self._double_conv_block(self.comp_feats_ch, 512, self.comp_feats_ch, 3, 2, 1),  # 160x160 -> 80x80
             # 세번째 부터 도형과 면의 개념이 제대로 추출 되기 시작 하며 멀티 스케일 개념
             # 출력 채널의 개수는 전부 같고, conv 커널 개수도 입력 값에 따르기 때문에 같아짐
-            self._double_conv_block(16, 128, 32, 3, 2, 1),  # 80x80 -> 40x40
-            self._double_conv_block(32, 256, 64, 3, 2, 1),  # 40x40 -> 20x20
-            self._double_conv_block(64, 512, 64, 3, 2, 1),  # 20x20 -> 10x10
-            self._double_conv_block(64, 512, 64, 3, 2, 1),  # 10x10 -> 5x5
-            self._double_conv_block(64, 512, 64, 3, 2, 1),  # 5x5 -> 3x3
-            self._double_conv_block(64, 512, 64, 3, 1, 0),  # 3x3 -> 1x1
+            self._double_conv_block(self.comp_feats_ch, 512, self.comp_feats_ch, 3, 2, 1),  # 80x80 -> 40x40
+            self._double_conv_block(self.comp_feats_ch, 512, self.comp_feats_ch, 3, 2, 1),  # 40x40 -> 20x20
+            self._double_conv_block(self.comp_feats_ch, 512, self.comp_feats_ch, 3, 2, 1),  # 20x20 -> 10x10
+            self._double_conv_block(self.comp_feats_ch, 512, self.comp_feats_ch, 3, 2, 1),  # 10x10 -> 5x5
+            self._double_conv_block(self.comp_feats_ch, 512, self.comp_feats_ch, 3, 2, 1),  # 5x5 -> 3x3
+            self._double_conv_block(self.comp_feats_ch, 512, self.comp_feats_ch, 3, 1, 0)  # 3x3 -> 1x1
         ])
 
     def _single_conv_block(self, in_ch, out_ch, ks, strd, pdd):
@@ -64,12 +70,18 @@ class EssenceNet(nn.Module):
 
         # 멀티 스케일 형태 정보 추출
         x = gray_feats
+        comp_feats_list = []
         for i, comp_feat_block in enumerate(self.comp_feat_blocks):
             # 특징 추출
             x = comp_feat_block(x)
 
             # 멀티 스케일 형태 정보 저장
-            result_feats_list.append(F.interpolate(x, size=(target_h, target_w), mode='nearest'))
+            if i in self.save_feat_idx_list:
+                comp_feats_list.append(x)
+
+        # 저장된 인터폴레이션 결과를 역순으로 추가
+        for feat in reversed(comp_feats_list):
+            result_feats_list.append(F.interpolate(feat, size=(target_h, target_w), mode='nearest'))
 
         # 특징 정보들 torch concat
         essential_feats = torch.cat(result_feats_list, dim=1)
@@ -83,21 +95,18 @@ class UpsampleConcatClassifier(nn.Module):
         super().__init__()
         self.backbone = EssenceNet()
 
-        dummy_input = torch.zeros(2, 3, 320, 320)
-        with torch.no_grad():
-            backbone_output = self.backbone(dummy_input)
+        # 백본 모델 특징맵 앞의 N채널(컬러 3채널 + 글로벌 영역부터 32 단위의 멀티 스케일 레이어)만 분리
+        self.backbone_output_ch = 3 + (32 * 7)
 
-        _, backbone_output_ch, backbone_output_h, backbone_output_w = backbone_output.shape
-
-        hidden_dim = backbone_output_ch * 2
+        hidden_dim = self.backbone_output_ch * 2
 
         self.classifier = nn.Sequential(
             nn.AdaptiveAvgPool2d((1, 1)),
             nn.Flatten(),
-            nn.BatchNorm1d(backbone_output_ch),
+            nn.BatchNorm1d(self.backbone_output_ch),
             nn.Dropout(0.3),
 
-            nn.Linear(backbone_output_ch, hidden_dim),
+            nn.Linear(self.backbone_output_ch, hidden_dim),
             nn.BatchNorm1d(hidden_dim),
             nn.SiLU(),
             nn.Dropout(0.3),
@@ -107,5 +116,8 @@ class UpsampleConcatClassifier(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.backbone(x)
+
+        x = x[:, :self.backbone_output_ch, :, :]
+
         x = self.classifier(x)
         return x
