@@ -12,9 +12,13 @@ class EssenceNet(nn.Module):
         self.comp_feat_blocks = nn.ModuleList([
             # 처음은 픽셀 단위 직선 검출 (확정 구조)
             # 연결성 패턴(가로+세로 10, 대각 위 10, 대각 아래 10, 전체 1)
-            self._double_conv_block(1, 32, 4, 3, 2, 1),  # 320x320 -> 160x160
-            self._double_conv_block(4, 128, 32, 3, 2, 1),  # 160x160 -> 80x80
-            self._double_conv_block(32, 256, 64, 3, 2, 1),  # 80x80 -> 40x40
+            self._double_conv_block(1, 32, 1, 3, 2, 1),  # 320x320 -> 160x160
+            # 두번째는 픽셀 단위 직선 3개의 조합(곡선)으로, 여전히 선형 탐지이며, 입력 채널이 1 이므로 32*1 를 해서 32 커널
+            # 첫번째 레이어가 각도를 나타내기 위해 1 채널을 썼다면, 분절된 out_ch 개의 공간의 각도를 표현하는 개념. (구불구불한 선의 종류)
+            self._double_conv_block(1, 32, 16, 3, 2, 1),  # 160x160 -> 80x80
+            # 세번째 부터 도형과 면의 개념이 추출되기 시작하며 멀티 스케일 개념
+            # 출력 채널의 개수는 전부 같고, conv 커널 개수도 입력 값에 따르기 때문에 같아짐
+            self._double_conv_block(16, 128, 64, 3, 2, 1),  # 80x80 -> 40x40
             self._double_conv_block(64, 512, 64, 3, 2, 1),  # 40x40 -> 20x20
             self._double_conv_block(64, 512, 64, 3, 2, 1),  # 20x20 -> 10x10
             self._double_conv_block(64, 512, 64, 3, 2, 1),  # 10x10 -> 5x5
