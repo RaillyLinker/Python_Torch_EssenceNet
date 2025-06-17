@@ -10,28 +10,40 @@ class EssenceNet(nn.Module):
         self.comp_feat_blocks = nn.ModuleList([
             # 3x3 픽셀 단위 특징 검출
             # 정보가 혼재된 노이즈 신호
-            self._double_conv_block(1, 32, 16, 3, 2, 1),  # 320x320 -> 160x160
+            self._double_conv_block(2, 32, 16, 3, 2, 1),  # 320x320 -> 160x160
             # 7x7 픽셀 단위 특징 검출
             # 노이즈 + 점의 의미
-            self._depthwise_separable_conv_block(16, 64, 3, 2, 1),  # 160x160 -> 80x80
+            self._double_conv_block(16, 64, 64, 3, 2, 1),  # 160x160 -> 80x80
             # 15x15 픽셀 단위 특징 검출
             # 점 + 작은 단위 선
-            self._depthwise_separable_conv_block(64, 96, 3, 2, 1),  # 80x80 -> 40x40
+            self._double_conv_block(64, 96, 96, 3, 2, 1),  # 80x80 -> 40x40
             # 31x31 픽셀 단위 특징 검출
             # 점 + 자유로운 선 + 최소 단위 도형
-            self._depthwise_separable_conv_block(96, 128, 3, 2, 1),  # 40x40 -> 20x20
+            self._double_conv_block(96, 128, 128, 3, 2, 1),  # 40x40 -> 20x20
             # 63x63 픽셀 단위 특징 검출
             # 점 + 자유로운 선 + 자유로운 도형
-            self._depthwise_separable_conv_block(128, 160, 3, 2, 1),  # 20x20 -> 10x10
+            self._double_conv_block(128, 160, 160, 3, 2, 1),  # 20x20 -> 10x10
             # 127x127 픽셀 단위 특징 검출
             # 점 + 자유로운 선 + 자유로운 도형 + 질감
             # 실사 이미지 표현이 가능한 영역이며, 아래부터는 추상적 정보
-            self._depthwise_separable_conv_block(160, 224, 3, 2, 1),  # 10x10 -> 5x5
+            self._double_conv_block(160, 224, 224, 3, 2, 1),  # 10x10 -> 5x5
             # 255x255 픽셀 단위 특징 검출
-            self._depthwise_separable_conv_block(224, 256, 3, 2, 1),  # 5x5 -> 3x3
+            self._double_conv_block(224, 256, 256, 3, 2, 1),  # 5x5 -> 3x3
             # 320x320 픽셀 단위 특징 검출
-            self._depthwise_separable_conv_block(256, 512, 3, 1, 0)  # 3x3 -> 1x1
+            self._double_conv_block(256, 512, 512, 3, 1, 0)  # 3x3 -> 1x1
         ])
+
+        self.register_buffer('scharr_x', torch.tensor(
+            [[-3., 0., 3.],
+             [-10., 0., 10.],
+             [-3., 0., 3.]]
+        ).view(1, 1, 3, 3))
+
+        self.register_buffer('scharr_y', torch.tensor(
+            [[-3., -10., -3.],
+             [0., 0., 0.],
+             [3., 10., 3.]]
+        ).view(1, 1, 3, 3))
 
     def _single_conv_block(self, in_ch, out_ch, ks, strd, pdd):
         return nn.Sequential(
@@ -54,20 +66,13 @@ class EssenceNet(nn.Module):
             nn.SiLU()
         )
 
-    # Ghost-Net 방식으로 핵심 정보를 가진 첫째 레이어에서부터 시작해서 다음으로는 Depthwise-Pointwise 구조로 정보 추출
-    # todo : 만약 이 방식의 정확도가 나오지 않는다면 전체 double_conv_block 적용(경량화 필요)
-    def _depthwise_separable_conv_block(self, in_ch, out_ch, ks, strd, pdd):
-        return nn.Sequential(
-            # Depthwise convolution
-            nn.Conv2d(in_ch, in_ch, kernel_size=ks, stride=strd, padding=pdd, groups=in_ch, bias=False),
-            nn.BatchNorm2d(in_ch),
-            nn.SiLU(),
+    def _apply_scharr_filter(self, gray_img):
+        device = gray_img.device
+        edge_x = F.conv2d(gray_img, self.scharr_x.to(device), padding=1)
+        edge_y = F.conv2d(gray_img, self.scharr_y.to(device), padding=1)
 
-            # Pointwise convolution (1x1)
-            nn.Conv2d(in_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
-            nn.BatchNorm2d(out_ch),
-            nn.SiLU()
-        )
+        edge_magnitude = torch.tanh(torch.sqrt(edge_x ** 2 + edge_y ** 2 + 1e-6))
+        return edge_magnitude
 
     def forward(self, x):
         assert x.shape[1] == 3, "Input tensor must have 3 channels (RGB)."
@@ -83,8 +88,13 @@ class EssenceNet(nn.Module):
         # 1x1 conv 를 굳이 할 필요 없이 검증된 알고리즘을 사용
         gray_feats = (0.2989 * x[:, 0:1, :, :] + 0.5870 * x[:, 1:2, :, :] + 0.1140 * x[:, 2:3, :, :])
 
+        # scharr 필터 적용 (에지 정보 전처리 1채널 추가, CNN 보다 가벼운 연산으로 외곽 특징 검출을 보조)
+        edge_feats = self._apply_scharr_filter(gray_feats)
+
+        # 흑백 + Sobel 결합 (2채널)
+        x = torch.cat([gray_feats, edge_feats], dim=1)
+
         # 멀티 스케일 형태 정보 추출
-        x = gray_feats
         comp_feats_list = []
         for i, comp_feat_block in enumerate(self.comp_feat_blocks):
             # 특징 추출
