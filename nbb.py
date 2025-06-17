@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+# todo : 역치 개념을 적용하여 처음 n개 특징은 최종 특징에서 제외하기
 class EssenceNet(nn.Module):
     def __init__(self):
         super().__init__()
@@ -10,16 +11,14 @@ class EssenceNet(nn.Module):
         # 선(직선 + 곡선), 선명도, 질감, 도형 검출 (채널 크기 증량, 감축 가능)
         # 멀티 스케일 + 복합 형태 정보
         self.comp_feat_blocks = nn.ModuleList([
-            # 처음은 픽셀 단위 직선 검출 (확정 구조)
-            # 연결성 패턴(가로+세로 10, 대각 위 10, 대각 아래 10, 전체 1)
-            self._double_conv_block(1, 32, 1, 3, 2, 1),  # 320x320 -> 160x160
-            # 두번째는 픽셀 단위 직선 3개의 조합(곡선)으로, 여전히 선형 탐지이며, 입력 채널이 1 이므로 32*1 를 해서 32 커널
-            # 첫번째 레이어가 각도를 나타내기 위해 1 채널을 썼다면, 분절된 out_ch 개의 공간의 각도를 표현하는 개념. (구불구불한 선의 종류)
-            self._double_conv_block(1, 32, 16, 3, 2, 1),  # 160x160 -> 80x80
-            # 세번째 부터 도형과 면의 개념이 추출되기 시작하며 멀티 스케일 개념
+            # 처음은 3x3 픽셀 단위 특징 검출
+            self._double_conv_block(1, 32, 8, 3, 2, 1),  # 320x320 -> 160x160
+            # 다음은 9x9 픽셀 단위 특징 검출(아직 질감 등은 추출 되지 않음)
+            self._double_conv_block(8, 64, 16, 3, 2, 1),  # 160x160 -> 80x80
+            # 세번째 부터 도형과 면의 개념이 제대로 추출 되기 시작 하며 멀티 스케일 개념
             # 출력 채널의 개수는 전부 같고, conv 커널 개수도 입력 값에 따르기 때문에 같아짐
-            self._double_conv_block(16, 128, 64, 3, 2, 1),  # 80x80 -> 40x40
-            self._double_conv_block(64, 512, 64, 3, 2, 1),  # 40x40 -> 20x20
+            self._double_conv_block(16, 128, 32, 3, 2, 1),  # 80x80 -> 40x40
+            self._double_conv_block(32, 256, 64, 3, 2, 1),  # 40x40 -> 20x20
             self._double_conv_block(64, 512, 64, 3, 2, 1),  # 20x20 -> 10x10
             self._double_conv_block(64, 512, 64, 3, 2, 1),  # 10x10 -> 5x5
             self._double_conv_block(64, 512, 64, 3, 2, 1),  # 5x5 -> 3x3
@@ -62,9 +61,6 @@ class EssenceNet(nn.Module):
         gray_feats = (0.2989 * x[:, 0:1, :, :] +
                       0.5870 * x[:, 1:2, :, :] +
                       0.1140 * x[:, 2:3, :, :])
-
-        # 이미지 전 범위 평균 밝기 계산 및 저장(320x320)
-        result_feats_list.append(gray_feats.mean(dim=(2, 3), keepdim=True).expand(-1, -1, target_h, target_w))
 
         # 멀티 스케일 형태 정보 추출
         x = gray_feats
