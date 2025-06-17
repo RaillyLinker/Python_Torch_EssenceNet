@@ -12,20 +12,33 @@ class EssenceNet(nn.Module):
         self.comp_feat_blocks = nn.ModuleList([
             # 처음은 픽셀 단위 직선 검출 (확정 구조)
             # 연결성 패턴(가로+세로 10, 대각 위 10, 대각 아래 10, 전체 1)
-            self._single_conv_block(1, 31, 3, 2, 1),  # 320x320 -> 160x160
-            self._single_conv_block(31, 31, 3, 2, 1),  # 160x160 -> 80x80
-            self._single_conv_block(31, 31, 3, 2, 1),  # 80x80 -> 40x40
-            self._single_conv_block(31, 31, 3, 2, 1),  # 40x40 -> 20x20
-            self._single_conv_block(31, 31, 3, 2, 1),  # 20x20 -> 10x10
-            self._single_conv_block(31, 31, 3, 2, 1),  # 10x10 -> 5x5
-            self._single_conv_block(31, 31, 3, 2, 1),  # 5x5 -> 3x3
-            self._single_conv_block(31, 31, 3, 1, 0),  # 3x3 -> 1x1
+            self._double_conv_block(1, 32, 4, 3, 2, 1),  # 320x320 -> 160x160
+            self._double_conv_block(4, 32, 8, 3, 2, 1),  # 160x160 -> 80x80
+            self._double_conv_block(8, 32, 16, 3, 2, 1),  # 80x80 -> 40x40
+            self._double_conv_block(16, 32, 32, 3, 2, 1),  # 40x40 -> 20x20
+            self._double_conv_block(32, 32, 32, 3, 2, 1),  # 20x20 -> 10x10
+            self._double_conv_block(32, 32, 32, 3, 2, 1),  # 10x10 -> 5x5
+            self._double_conv_block(32, 32, 32, 3, 2, 1),  # 5x5 -> 3x3
+            self._double_conv_block(32, 32, 32, 3, 1, 0),  # 3x3 -> 1x1
         ])
 
     def _single_conv_block(self, in_ch, out_ch, ks, strd, pdd):
         return nn.Sequential(
             # 평면당 형태를 파악
             nn.Conv2d(in_ch, out_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.SiLU()
+        )
+
+    def _double_conv_block(self, in_ch, mid_ch, out_ch, ks, strd, pdd):
+        return nn.Sequential(
+            # 평면당 형태를 파악
+            nn.Conv2d(in_ch, mid_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
+            nn.BatchNorm2d(mid_ch),
+            nn.SiLU(),
+
+            # 채널간 패턴 분석
+            nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
             nn.BatchNorm2d(out_ch),
             nn.SiLU()
         )
