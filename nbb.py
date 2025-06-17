@@ -90,6 +90,8 @@ class EssenceNet(nn.Module):
 
         # scharr 필터 적용 (에지 정보 전처리 1채널 추가, CNN 보다 가벼운 연산으로 외곽 특징 검출을 보조)
         edge_feats = self._apply_scharr_filter(gray_feats)
+        # 에지 특징 저장(160x160)
+        result_feats_list.append(F.interpolate(edge_feats, scale_factor=0.5, mode='bilinear', align_corners=False))
 
         # 흑백 + Sobel 결합 (2채널)
         x = torch.cat([gray_feats, edge_feats], dim=1)
@@ -104,6 +106,8 @@ class EssenceNet(nn.Module):
             comp_feats_list.append(x)
 
         # 저장된 인터폴레이션 결과 추가
+        # 픽셀 색상 데이터, 에지 데이터, 작은 범위 comp_feats 데이터, 조금 더 큰 범위 comp_feats 데이터...Global feats 데이터
+        # 위와 같은 방식으로 뒤로 갈수록 더 큰 범주의 특징이 나옵니다.
         for feat in comp_feats_list:
             result_feats_list.append(F.interpolate(feat, size=(target_h, target_w), mode='nearest'))
 
