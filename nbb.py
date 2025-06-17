@@ -1,8 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from dropblock import DropBlock2D
 
 
+# todo : 오버피팅 있으면 해결하기(stochastic depth), 성능이 안 나오면 역전파 방식 사용, 혹은 나오는 출력값을 1x1 conv 로 연결
 class EssenceNet(nn.Module):
     def __init__(self):
         super().__init__()
@@ -10,16 +12,16 @@ class EssenceNet(nn.Module):
         self.comp_feat_blocks = nn.ModuleList([
             # 3x3 픽셀 단위 특징 검출
             # 정보가 혼재된 노이즈 신호
-            self._double_conv_block(3, 32, 16, 3, 2, 1),  # 320x320 -> 160x160
+            self._double_conv_block_with_drop(1, 32, 16, 3, 2, 1, 7, 0.1),  # 320x320 -> 160x160
             # 7x7 픽셀 단위 특징 검출
             # 노이즈 + 점의 의미
-            self._double_conv_block(16, 64, 64, 3, 2, 1),  # 160x160 -> 80x80
+            self._double_conv_block_with_drop(16, 64, 64, 3, 2, 1, 5, 0.09),  # 160x160 -> 80x80
             # 15x15 픽셀 단위 특징 검출
             # 점 + 작은 단위 선
-            self._double_conv_block(64, 96, 96, 3, 2, 1),  # 80x80 -> 40x40
+            self._double_conv_block_with_drop(64, 96, 96, 3, 2, 1, 3, 0.08),  # 80x80 -> 40x40
             # 31x31 픽셀 단위 특징 검출
             # 점 + 자유로운 선 + 최소 단위 도형
-            self._double_conv_block(96, 128, 128, 3, 2, 1),  # 40x40 -> 20x20
+            self._double_conv_block_with_drop(96, 128, 128, 3, 2, 1, 3, 0.07),  # 40x40 -> 20x20
             # 63x63 픽셀 단위 특징 검출
             # 점 + 자유로운 선 + 자유로운 도형
             self._double_conv_block(128, 160, 160, 3, 2, 1),  # 20x20 -> 10x10
@@ -33,31 +35,17 @@ class EssenceNet(nn.Module):
             self._double_conv_block(256, 512, 512, 3, 1, 0)  # 3x3 -> 1x1
         ])
 
-        # Scharr kernels
-        scharr_x = torch.tensor(
-            [[[-3., 0., 3.],
-              [-10., 0., 10.],
-              [-3., 0., 3.]]],
-            dtype=torch.float32
-        )
-        scharr_y = torch.tensor(
-            [[[-3., -10., -3.],
-              [0., 0., 0.],
-              [3., 10., 3.]]],
-            dtype=torch.float32
-        )
-        # 이름 ‘scharr_x’/‘scharr_y’ 로 버퍼 등록
-        self.register_buffer('scharr_x', scharr_x)
-        self.register_buffer('scharr_y', scharr_y)
-        # self.register_buffer('pi_const', torch.tensor(math.pi))
-
-    def _single_conv_block(self, in_ch, out_ch, ks, strd, pdd):
-        return nn.Sequential(
-            # 평면당 형태를 파악
-            nn.Conv2d(in_ch, out_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
-            nn.BatchNorm2d(out_ch),
-            nn.SiLU()
-        )
+        # Residual 연결을 위한 1x1 conv 계층 (in_channels → out_channels)
+        self.residual_convs = nn.ModuleList([
+            nn.Conv2d(1, 16, kernel_size=1, bias=False),
+            nn.Conv2d(16, 64, kernel_size=1, bias=False),
+            nn.Conv2d(64, 96, kernel_size=1, bias=False),
+            nn.Conv2d(96, 128, kernel_size=1, bias=False),
+            nn.Conv2d(128, 160, kernel_size=1, bias=False),
+            nn.Conv2d(160, 224, kernel_size=1, bias=False),
+            nn.Conv2d(224, 256, kernel_size=1, bias=False),
+            nn.Conv2d(256, 512, kernel_size=1, bias=False)
+        ])
 
     def _double_conv_block(self, in_ch, mid_ch, out_ch, ks, strd, pdd):
         return nn.Sequential(
@@ -72,30 +60,19 @@ class EssenceNet(nn.Module):
             nn.SiLU()
         )
 
-    def _apply_scharr_filter(self, gray_img):
-        # buffer 로 올라간 커널은 model.to(device) 시 자동으로 이동/캐스팅됨
-        edge_x = F.conv2d(gray_img, self.scharr_x.unsqueeze(0), padding=1)
-        edge_y = F.conv2d(gray_img, self.scharr_y.unsqueeze(0), padding=1)
+    def _double_conv_block_with_drop(self, in_ch, mid_ch, out_ch, ks, strd, pdd, dbs, dbp):
+        return nn.Sequential(
+            # 평면당 형태를 파악
+            nn.Conv2d(in_ch, mid_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
+            nn.BatchNorm2d(mid_ch),
+            nn.SiLU(),
+            DropBlock2D(block_size=dbs, drop_prob=dbp),
 
-        # x/y 방향 에지 정규화: [-1, 1] → [0, 1]
-        edge_x_tanh = torch.tanh(edge_x)
-        edge_y_tanh = torch.tanh(edge_y)
-        edge_x_norm = (edge_x_tanh + 1) / 2
-        edge_y_norm = (edge_y_tanh + 1) / 2
-
-        # # 종합 세기
-        # # magnitude: hypot(x, y) → [0, 1]
-        # edge_magnitude = torch.hypot(edge_x, edge_y)
-        # edge_magnitude = edge_magnitude / (edge_magnitude.amax(dim=[1, 2, 3], keepdim=True) + 1e-6)
-        # edge_magnitude = edge_magnitude.clamp(0, 1)
-        #
-        # # 각도
-        # # angle: atan2(y, x) / π → [-1, 1] → [0, 1]
-        # edge_angle = torch.atan2(edge_y, edge_x)
-        # edge_angle_norm = (edge_angle / self.pi_const + 1) / 2  # → [0, 1]
-
-        # 수평 세기, 수직 세기
-        return edge_x_norm, edge_y_norm
+            # 채널간 패턴 분석
+            nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.SiLU()
+        )
 
     def forward(self, x):
         assert x.shape[1] == 3, "Input tensor must have 3 channels (RGB)."
@@ -111,23 +88,21 @@ class EssenceNet(nn.Module):
         # 1x1 conv 를 굳이 할 필요 없이 검증된 알고리즘을 사용
         gray_feats = (0.2989 * x[:, 0:1, :, :] + 0.5870 * x[:, 1:2, :, :] + 0.1140 * x[:, 2:3, :, :])
 
-        # scharr 필터 적용 (에지 정보 전처리 1채널 추가, CNN 보다 가벼운 연산으로 외곽 특징 검출을 보조)
-        edge_x, edge_y = self._apply_scharr_filter(gray_feats)
-
-        # 에지 특징 저장(160x160)
-        for feat in (edge_x, edge_y):
-            result_feats_list.append(F.interpolate(feat, scale_factor=0.5, mode='bilinear', align_corners=False))
-
-        # 흑백 + 에지 특징 결합
-        x = torch.cat([gray_feats, edge_x, edge_y], dim=1)
+        # 흑백
+        x = gray_feats
 
         # 멀티 스케일 형태 정보 추출
         comp_feats_list = []
-        for i, comp_feat_block in enumerate(self.comp_feat_blocks):
-            # 특징 추출
-            x = comp_feat_block(x)
+        for i, (block, res_conv) in enumerate(zip(self.comp_feat_blocks, self.residual_convs)):
+            x_in = x
+            x = block(x)
 
-            # 멀티 스케일 형태 정보 저장
+            # Residual 연결 (크기와 채널 수를 맞춘 후 더함)
+            res = res_conv(x_in)
+            if res.shape[2:] != x.shape[2:]:
+                res = F.interpolate(res, size=x.shape[2:], mode='nearest')
+            x = x + res
+
             comp_feats_list.append(x)
 
         # 저장된 인터폴레이션 결과 추가

@@ -61,7 +61,7 @@ if __name__ == "__main__":
         print(f"✅ Loaded pretrained model from {PRETRAINED_MODEL_PATH}")
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=1e-4)
+    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=1e-4, weight_decay=1e-4)
 
 
     # ----------------------------
