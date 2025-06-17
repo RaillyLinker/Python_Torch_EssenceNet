@@ -6,10 +6,6 @@ import torch.nn.functional as F
 class EssenceNet(nn.Module):
     def __init__(self):
         super().__init__()
-        # 특징맵을 저장할 comp_feat_blocks 의 레이어 인덱스 리스트
-        # 초기 인덱스는 역치에 따라 저장하지 않을 수 있고, 일정 간격을 스킵하는 방식으로 저장할 수도 있음
-        self.save_feat_idx_list = [1, 2, 3, 4, 5, 6, 7]
-
         # 멀티 스케일 + 복합 형태 정보
         self.comp_feat_blocks = nn.ModuleList([
             # 3x3 픽셀 단위 특징 검출
@@ -62,10 +58,10 @@ class EssenceNet(nn.Module):
         assert x.shape[1] == 3, "Input tensor must have 3 channels (RGB)."
 
         result_feats_list = []
-        target_h, target_w = x.shape[2], x.shape[3]
+        target_h, target_w = x.shape[2] // 2, x.shape[3] // 2
 
-        # 컬러 특징 저장(320x320)
-        result_feats_list.append(x)
+        # 컬러 특징 저장(160x160)
+        result_feats_list.append(F.interpolate(x, scale_factor=0.5, mode='bilinear', align_corners=False))
 
         # 분석을 위한 흑백 변환(320x320)
         # 컬러 이미지는 그 자체로 색이란 특징을 지닌 특징 맵이고, 형태 특징을 구하기 위한 입력 값은 흑백으로 충분
@@ -80,11 +76,10 @@ class EssenceNet(nn.Module):
             x = comp_feat_block(x)
 
             # 멀티 스케일 형태 정보 저장
-            if i in self.save_feat_idx_list:
-                comp_feats_list.append(x)
+            comp_feats_list.append(x)
 
-        # 저장된 인터폴레이션 결과를 역순으로 추가
-        for feat in reversed(comp_feats_list):
+        # 저장된 인터폴레이션 결과 추가
+        for feat in comp_feats_list:
             result_feats_list.append(F.interpolate(feat, size=(target_h, target_w), mode='nearest'))
 
         # 특징 정보들 torch concat
