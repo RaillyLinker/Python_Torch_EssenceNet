@@ -117,7 +117,7 @@ class EssenceNet(nn.Module):
         target_h, target_w = x.shape[2] // 2, x.shape[3] // 2
 
         # 컬러 특징 저장(160x160)
-        result_feats_list.append(F.interpolate(x, scale_factor=0.5, mode='bilinear', align_corners=False))
+        result_feats_list.append(F.interpolate(x, scale_factor=0.5, mode='nearest'))
 
         # 분석을 위한 흑백 변환(320x320)
         # 컬러 이미지는 그 자체로 색이란 특징을 지닌 특징 맵이고, 형태 특징을 구하기 위한 입력 값은 흑백으로 충분
