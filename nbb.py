@@ -4,7 +4,21 @@ import torch.nn.functional as F
 from dropblock import DropBlock2D
 
 
-# todo : 오버피팅 있으면 해결하기(stochastic depth), 성능이 안 나오면 역전파 방식 사용, 혹은 나오는 출력값을 1x1 conv 로 연결
+class StochasticDepth(nn.Module):
+    def __init__(self, drop_prob: float):
+        super().__init__()
+        self.drop_prob = drop_prob
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if not self.training or self.drop_prob == 0.0:
+            return x
+        keep_prob = 1.0 - self.drop_prob
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+        random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
+        binary_mask = torch.floor(random_tensor)
+        return x.div(keep_prob) * binary_mask
+
+
 class EssenceNet(nn.Module):
     def __init__(self):
         super().__init__()
@@ -35,17 +49,41 @@ class EssenceNet(nn.Module):
             self._double_conv_block(256, 512, 512, 3, 1, 0)  # 3x3 -> 1x1
         ])
 
-        # Residual 연결을 위한 1x1 conv 계층 (in_channels → out_channels)
-        self.residual_convs = nn.ModuleList([
-            nn.Conv2d(1, 16, kernel_size=1, bias=False),
-            nn.Conv2d(16, 64, kernel_size=1, bias=False),
-            nn.Conv2d(64, 96, kernel_size=1, bias=False),
-            nn.Conv2d(96, 128, kernel_size=1, bias=False),
-            nn.Conv2d(128, 160, kernel_size=1, bias=False),
-            nn.Conv2d(160, 224, kernel_size=1, bias=False),
-            nn.Conv2d(224, 256, kernel_size=1, bias=False),
-            nn.Conv2d(256, 512, kernel_size=1, bias=False)
+        # Residual 연결을 위한 1x1 conv 계층
+        self.residual_convs = nn.ModuleList()
+        for block in self.comp_feat_blocks:
+            first_conv = None
+            second_conv = None
+            for layer in block.children():
+                if isinstance(layer, nn.Conv2d):
+                    if first_conv is None:
+                        first_conv = layer
+                    else:
+                        second_conv = layer
+                        break
+            in_ch = first_conv.in_channels
+            out_ch = second_conv.out_channels
+            self.residual_convs.append(nn.Conv2d(in_ch, out_ch, kernel_size=1, bias=False))
+
+        self.post_bn_activations = nn.ModuleList()
+        for block in self.comp_feat_blocks:
+            second_conv = None
+            for layer in block.children():
+                if isinstance(layer, nn.Conv2d):
+                    second_conv = layer  # 마지막 Conv2d
+            out_ch = second_conv.out_channels
+            self.post_bn_activations.append(nn.Sequential(
+                nn.BatchNorm2d(out_ch),
+                nn.SiLU()
+            ))
+
+        num_blocks = len(self.comp_feat_blocks)
+        drop_probs = [float(i) / num_blocks * 0.2 for i in range(num_blocks)]
+        self.drop_paths = nn.ModuleList([
+            StochasticDepth(p) for p in drop_probs
         ])
+
+        self._init_weights()
 
     def _double_conv_block(self, in_ch, mid_ch, out_ch, ks, strd, pdd):
         return nn.Sequential(
@@ -74,6 +112,14 @@ class EssenceNet(nn.Module):
             nn.SiLU()
         )
 
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='silu')
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
     def forward(self, x):
         assert x.shape[1] == 3, "Input tensor must have 3 channels (RGB)."
 
@@ -88,22 +134,19 @@ class EssenceNet(nn.Module):
         # 1x1 conv 를 굳이 할 필요 없이 검증된 알고리즘을 사용
         gray_feats = (0.2989 * x[:, 0:1, :, :] + 0.5870 * x[:, 1:2, :, :] + 0.1140 * x[:, 2:3, :, :])
 
-        # 흑백
-        x = gray_feats
-
         # 멀티 스케일 형태 정보 추출
+        x_in = gray_feats
         comp_feats_list = []
-        for i, (block, res_conv) in enumerate(zip(self.comp_feat_blocks, self.residual_convs)):
-            x_in = x
-            x = block(x)
-
-            # Residual 연결 (크기와 채널 수를 맞춘 후 더함)
+        for i, (block, res_conv, drop_path, post_bn_act) in enumerate(
+                zip(self.comp_feat_blocks, self.residual_convs, self.drop_paths, self.post_bn_activations)):
+            x_out = block(x_in)
+            x_out = drop_path(x_out)
             res = res_conv(x_in)
-            if res.shape[2:] != x.shape[2:]:
-                res = F.interpolate(res, size=x.shape[2:], mode='nearest')
-            x = x + res
-
-            comp_feats_list.append(x)
+            if res.shape[2:] != x_out.shape[2:]:
+                res = F.interpolate(res, size=x_out.shape[2:], mode='nearest')
+            x_in = x_out + res
+            x_in = post_bn_act(x_in)
+            comp_feats_list.append(x_in)
 
         # 저장된 인터폴레이션 결과 추가
         # 픽셀 색상 데이터, 에지 데이터, 작은 범위 comp_feats 데이터, 조금 더 큰 범위 comp_feats 데이터...Global feats 데이터
