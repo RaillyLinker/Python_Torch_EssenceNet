@@ -83,8 +83,6 @@ class EssenceNet(nn.Module):
             StochasticDepth(p) for p in drop_probs
         ])
 
-        self._init_weights()
-
     def _double_conv_block(self, in_ch, mid_ch, out_ch, ks, strd, pdd):
         return nn.Sequential(
             # 평면당 형태를 파악
@@ -112,14 +110,6 @@ class EssenceNet(nn.Module):
             nn.SiLU()
         )
 
-    def _init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='silu')
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-
     def forward(self, x):
         assert x.shape[1] == 3, "Input tensor must have 3 channels (RGB)."
 
@@ -138,7 +128,8 @@ class EssenceNet(nn.Module):
         x_in = gray_feats
         comp_feats_list = []
         for i, (block, res_conv, drop_path, post_bn_act) in enumerate(
-                zip(self.comp_feat_blocks, self.residual_convs, self.drop_paths, self.post_bn_activations)):
+                zip(self.comp_feat_blocks, self.residual_convs, self.drop_paths, self.post_bn_activations)
+        ):
             x_out = block(x_in)
             x_out = drop_path(x_out)
             res = res_conv(x_in)
