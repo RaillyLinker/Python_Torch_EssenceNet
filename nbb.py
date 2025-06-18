@@ -52,26 +52,16 @@ class EssenceNet(nn.Module):
         # Residual 연결을 위한 1x1 conv 계층
         self.residual_convs = nn.ModuleList()
         for block in self.comp_feat_blocks:
-            first_conv = None
-            second_conv = None
-            for layer in block.children():
-                if isinstance(layer, nn.Conv2d):
-                    if first_conv is None:
-                        first_conv = layer
-                    else:
-                        second_conv = layer
-                        break
-            in_ch = first_conv.in_channels
-            out_ch = second_conv.out_channels
+            conv_layers = [l for l in block.children() if isinstance(l, nn.Conv2d)]
+            in_ch = conv_layers[0].in_channels
+            out_ch = conv_layers[-1].out_channels
             self.residual_convs.append(nn.Conv2d(in_ch, out_ch, kernel_size=1, bias=False))
 
+        # Post-BN + Activation 블록
         self.post_bn_activations = nn.ModuleList()
         for block in self.comp_feat_blocks:
-            second_conv = None
-            for layer in block.children():
-                if isinstance(layer, nn.Conv2d):
-                    second_conv = layer  # 마지막 Conv2d
-            out_ch = second_conv.out_channels
+            conv_layers = [l for l in block.children() if isinstance(l, nn.Conv2d)]
+            out_ch = conv_layers[-1].out_channels
             self.post_bn_activations.append(nn.Sequential(
                 nn.BatchNorm2d(out_ch),
                 nn.SiLU()

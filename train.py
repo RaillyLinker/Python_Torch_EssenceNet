@@ -111,8 +111,8 @@ if __name__ == "__main__":
     val_ds = load_dataset("food101", split="validation")
 
     # 일부 샘플만 선택 (shuffle 먼저 하면 더 랜덤)
-    train_ds = train_ds.shuffle(seed=SEED).select(range(400))
-    val_ds = val_ds.shuffle(seed=SEED).select(range(100))
+    # train_ds = train_ds.shuffle(seed=SEED).select(range(400))
+    # val_ds = val_ds.shuffle(seed=SEED).select(range(100))
 
     train_ds = train_ds.map(transform_train, num_proc=1)
     train_ds = train_ds.filter(lambda x: x is not None)
