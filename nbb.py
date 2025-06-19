@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from dropblock import DropBlock2D
 
 
-# todo : residual 에 이전 결과가 아니라 흑백 이미지를 추가하기(혹은 +1 흑백 채널만 더 추가)
+# todo : residual 에 이전 결과가 아니라 흑백 이미지를 추가하기(혹은 +1 흑백 채널만 더 추가), residual 빼보기
 class StochasticDepth(nn.Module):
     def __init__(self, drop_prob: float):
         super().__init__()
@@ -27,27 +27,27 @@ class EssenceNet(nn.Module):
         self.comp_feat_blocks = nn.ModuleList([
             # 3x3 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지
-            self._double_conv_block_with_drop(1, 32, 16, 3, 2, 1, 7, 0.1),  # 320x320 -> 160x160
+            self._double_conv_block(1, 16, 16, 3, 2, 1),  # 320x320 -> 160x160
             # 7x7 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지 + 직선 + 작은 곡선 = 픽셀 아이콘 영역
-            self._double_conv_block_with_drop(16, 64, 64, 3, 2, 1, 5, 0.09),  # 160x160 -> 80x80
+            self._double_conv_block(16, 32, 32, 3, 2, 1),  # 160x160 -> 80x80
             # 15x15 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지 + 직선 + 곡선 + 패턴 = 픽셀 아이콘 영역
-            self._double_conv_block_with_drop(64, 96, 96, 3, 2, 1, 3, 0.08),  # 80x80 -> 40x40
+            self._double_conv_block(32, 48, 48, 3, 2, 1),  # 80x80 -> 40x40
             # 31x31 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지 + 자유로운 선 + 패턴 + 제한된 도형 = 픽셀 아트 영역
-            self._double_conv_block_with_drop(96, 128, 128, 3, 2, 1, 3, 0.07),  # 40x40 -> 20x20
+            self._double_conv_block(48, 64, 64, 3, 2, 1),  # 40x40 -> 20x20
             # 63x63 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지 + 자유로운 선 + 패턴 + 도형 = 픽셀 아트 영역
-            self._double_conv_block(128, 160, 160, 3, 2, 1),  # 20x20 -> 10x10
+            self._double_conv_block(64, 96, 96, 3, 2, 1),  # 20x20 -> 10x10
             # 127x127 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지 + 자유로운 선 + 패턴 + 자유로운 도형 + 질감 = 실사 이미지
-            self._double_conv_block(160, 224, 224, 3, 2, 1),  # 10x10 -> 5x5
+            self._double_conv_block(96, 128, 128, 3, 2, 1),  # 10x10 -> 5x5
             # 255x255 픽셀 단위 특징 검출
             # 아래부터는 추상적 정보
-            self._double_conv_block(224, 256, 256, 3, 2, 1),  # 5x5 -> 3x3
+            self._double_conv_block(128, 160, 160, 3, 2, 1),  # 5x5 -> 3x3
             # 320x320 픽셀 단위 특징 검출
-            self._double_conv_block(256, 512, 512, 3, 1, 0)  # 3x3 -> 1x1
+            self._double_conv_block(160, 192, 192, 3, 1, 0)  # 3x3 -> 1x1
         ])
 
         # Residual 연결을 위한 1x1 conv 계층
@@ -80,20 +80,6 @@ class EssenceNet(nn.Module):
             nn.Conv2d(in_ch, mid_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
             nn.BatchNorm2d(mid_ch),
             nn.SiLU(),
-
-            # 채널간 패턴 분석
-            nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
-            nn.BatchNorm2d(out_ch),
-            nn.SiLU()
-        )
-
-    def _double_conv_block_with_drop(self, in_ch, mid_ch, out_ch, ks, strd, pdd, dbs, dbp):
-        return nn.Sequential(
-            # 평면당 형태를 파악
-            nn.Conv2d(in_ch, mid_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
-            nn.BatchNorm2d(mid_ch),
-            nn.SiLU(),
-            DropBlock2D(block_size=dbs, drop_prob=dbp),
 
             # 채널간 패턴 분석
             nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
@@ -154,23 +140,47 @@ class UpsampleConcatClassifier(nn.Module):
 
         _, backbone_output_ch, backbone_output_h, backbone_output_w = backbone_output.shape
 
-        hidden_dim = backbone_output_ch * 2
-
         self.classifier = nn.Sequential(
-            nn.AdaptiveAvgPool2d((1, 1)),
-            nn.Flatten(),
-            nn.BatchNorm1d(backbone_output_ch),
-            nn.Dropout(0.3),
-
-            nn.Linear(backbone_output_ch, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
+            nn.Conv2d(backbone_output_ch, 256, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(256),
             nn.SiLU(),
-            nn.Dropout(0.3),
-
-            nn.Linear(hidden_dim, num_classes)
+            nn.AdaptiveAvgPool2d(1),  # (B, 256, 1, 1)
+            nn.Flatten(),  # (B, 256)
+            nn.Linear(256, num_classes)
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.backbone(x)
         x = self.classifier(x)
         return x
+
+# from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
+#
+#
+# class UpsampleConcatClassifier(nn.Module):
+#     def __init__(self, num_classes: int):
+#         super().__init__()
+#
+#         # EfficientNet-B0 로드 (특징 추출기만 사용)
+#         self.backbone = efficientnet_b0(weights=EfficientNet_B0_Weights.DEFAULT)
+#         self.backbone_features = self.backbone.features  # (B, 1280, 10, 10)
+#
+#         # dummy input으로 출력 크기 확인
+#         dummy_input = torch.zeros(1, 3, 224, 224)
+#         with torch.no_grad():
+#             backbone_out = self.backbone_features(dummy_input)
+#         _, ch, h, w = backbone_out.shape
+#
+#         self.classifier = nn.Sequential(
+#             nn.Conv2d(ch, 256, kernel_size=3, padding=1, bias=False),
+#             nn.BatchNorm2d(256),
+#             nn.SiLU(),
+#             nn.AdaptiveAvgPool2d(1),  # (B, 256, 1, 1)
+#             nn.Flatten(),  # (B, 256)
+#             nn.Linear(256, num_classes)
+#         )
+#
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
+#         x = self.backbone_features(x)
+#         x = self.classifier(x)
+#         return x
