@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torchvision.ops import StochasticDepth
 
 
+# todo residual 시 + 말고 concat -> 1x1 conv 로 해보기
 class EssenceNet(nn.Module):
     def __init__(self):
         super().__init__()
@@ -92,11 +93,10 @@ class EssenceNet(nn.Module):
                 zip(self.comp_feat_blocks, self.residual_convs, self.drop_paths, self.post_bn_activations)
         ):
             x_out = block(x_in)
-            x_out = drop_path(x_out)
             res = res_conv(x_in)
             if res.shape[2:] != x_out.shape[2:]:
                 res = F.interpolate(res, size=x_out.shape[2:], mode='nearest')
-            x_in = x_out + res
+            x_in = drop_path(x_out + res)
             x_in = post_bn_act(x_in)
             comp_feats_list.append(x_in)
 
