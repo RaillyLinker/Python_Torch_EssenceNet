@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from dropblock import DropBlock2D
 
 
 # todo : residual 에 이전 결과가 아니라 흑백 이미지를 추가하기(혹은 +1 흑백 채널만 더 추가), residual 빼보기
