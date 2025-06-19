@@ -1,0 +1,5 @@
+/checkpoints/**
+/runs/**
+/processed/**
+/__pycache__/**
+.idea
