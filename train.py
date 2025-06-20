@@ -139,7 +139,11 @@ if __name__ == "__main__":
         print(f"Loaded pretrained model from {PRETRAINED_MODEL_PATH}")
 
     criterion_fn = torch.nn.CrossEntropyLoss(label_smoothing=0.1)
-    optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=1e-4, weight_decay=1e-4)
+    optimizer = optim.AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=1e-4,
+        weight_decay=1e-6  # 초기 정규화 약하게
+    )
     scheduler = CosineAnnealingLR(optimizer, T_max=30)
     scaler = GradScaler(device='cuda')
 
@@ -209,6 +213,11 @@ if __name__ == "__main__":
         return total_loss / total_samples, total_correct / total_samples, inference_time, avg_inf_time
 
 
+    def interpolate_weight_decay(epoch, max_epoch, min_wd=1e-6, max_wd=1e-4):
+        alpha = epoch / max_epoch
+        return (1 - alpha) * min_wd + alpha * max_wd
+
+
     # ----------------------------
     # 학습 실행
     # ----------------------------
@@ -219,6 +228,10 @@ if __name__ == "__main__":
     max_epochs = 30
 
     for epoch in range(1, max_epochs + 1):
+        new_wd = interpolate_weight_decay(epoch, max_epochs)
+        for param_group in optimizer.param_groups:
+            param_group['weight_decay'] = new_wd
+
         print(f"\n===== Epoch {epoch} =====")
         train_loss, train_acc = train_epoch(model, train_loader, optimizer, device, scaler, use_mixup=True)
         val_loss, val_acc, val_time, avg_inf_time = eval_epoch(model, val_loader, device)
