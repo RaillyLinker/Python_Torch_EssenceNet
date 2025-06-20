@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torchvision.ops import StochasticDepth
 
 
+# todo : regidual + 를 하지 않고 gray image 를 채널로 추가하기
 class SEBlock(nn.Module):
     def __init__(self, channels):
         super(SEBlock, self).__init__()
@@ -25,7 +26,6 @@ class SEBlock(nn.Module):
         return x * y
 
 
-# todo residual 역전파 지름길을 아예 처음부터 끝까지 흑백 이미지로 연결하기
 class EssenceNet(nn.Module):
     def __init__(self):
         super().__init__()
@@ -33,34 +33,34 @@ class EssenceNet(nn.Module):
         self.comp_feat_blocks = nn.ModuleList([
             # 3x3 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지
-            self._double_conv_block(1, 12, 8, 3, 2, 1),  # 320x320 -> 160x160
+            self._double_conv_block(1, 16, 8, 3, 2, 1),  # 320x320 -> 160x160
             # 7x7 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지 + 직선 + 작은 곡선 = 픽셀 아이콘 영역
-            self._double_conv_block(8, 24, 16, 3, 2, 1),  # 160x160 -> 80x80
+            self._double_conv_block(8, 32, 16, 3, 2, 1),  # 160x160 -> 80x80
             # 15x15 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지 + 직선 + 곡선 + 패턴 = 픽셀 아이콘 영역
-            self._double_conv_block(16, 36, 24, 3, 2, 1),  # 80x80 -> 40x40
+            self._double_conv_block(16, 48, 24, 3, 2, 1),  # 80x80 -> 40x40
             # 31x31 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지 + 자유로운 선 + 패턴 + 제한된 도형 = 픽셀 아트 영역
-            self._double_conv_block(24, 48, 32, 3, 2, 1),  # 40x40 -> 20x20
+            self._double_conv_block(24, 64, 32, 3, 2, 1),  # 40x40 -> 20x20
             # 63x63 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지 + 자유로운 선 + 패턴 + 도형 = 픽셀 아트 영역
-            self._double_conv_block(32, 64, 48, 3, 2, 1),  # 20x20 -> 10x10
+            self._double_conv_block(32, 80, 48, 3, 2, 1),  # 20x20 -> 10x10
             # 127x127 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지 + 자유로운 선 + 패턴 + 자유로운 도형 + 질감 = 실사 이미지
-            self._double_conv_block(48, 80, 64, 3, 2, 1),  # 10x10 -> 5x5
+            self._double_conv_block(48, 96, 64, 3, 2, 1),  # 10x10 -> 5x5
             # 255x255 픽셀 단위 특징 검출
             # 아래부터는 추상적 정보
-            self._double_conv_block(64, 96, 80, 3, 2, 1),  # 5x5 -> 3x3
+            self._double_conv_block(64, 112, 80, 3, 2, 1),  # 5x5 -> 3x3
             # 320x320 픽셀 단위 특징 검출
-            self._double_conv_block(80, 112, 96, 3, 1, 0)  # 3x3 -> 1x1
+            self._double_conv_block(80, 128, 96, 3, 1, 0)  # 3x3 -> 1x1
         ])
 
         # Residual 연결을 위한 1x1 conv 계층
         self.residual_convs = nn.ModuleList()
         for block in self.comp_feat_blocks:
             conv_layers = [l for l in block.children() if isinstance(l, nn.Conv2d)]
-            in_ch = conv_layers[0].in_channels
+            in_ch = 1
             out_ch = conv_layers[-1].out_channels
             self.residual_convs.append(nn.Conv2d(in_ch, out_ch, kernel_size=1, bias=False))
 
@@ -106,7 +106,8 @@ class EssenceNet(nn.Module):
         target_h, target_w = x.shape[2] // 2, x.shape[3] // 2
 
         # 컬러 특징 저장(160x160)
-        result_feats_list.append(F.interpolate(x, scale_factor=0.5, mode='nearest'))
+        # 부드러운 다운 스케일링
+        result_feats_list.append(F.interpolate(x, scale_factor=0.5, mode='area'))
 
         # 분석을 위한 흑백 변환(320x320)
         # 컬러 이미지는 그 자체로 색이란 특징을 지닌 특징 맵이고, 형태 특징을 구하기 위한 입력 값은 흑백으로 충분
@@ -123,9 +124,10 @@ class EssenceNet(nn.Module):
             x_out = block(x_in)
             # 채널 중 중요한 채널을 강조
             x_out = se_block(x_out)
-            res = res_conv(x_in)
+            res = res_conv(gray_feats)
             if res.shape[2:] != x_out.shape[2:]:
-                res = F.interpolate(res, size=x_out.shape[2:], mode='nearest')
+                # 부드러운 다운 스케일링(최저 값은 평균값을 사용)
+                res = F.interpolate(res, size=x_out.shape[2:], mode='area')
             # 이전 결과값과 이번 결과값이 크게 나타나는 곳을 강조 및 역전파 지름길 만들기
             x_in = drop_path(x_out + res)
             x_in = post_bn_act(x_in)
@@ -135,6 +137,7 @@ class EssenceNet(nn.Module):
         # 픽셀 색상 데이터, 에지 데이터, 작은 범위 comp_feats 데이터, 조금 더 큰 범위 comp_feats 데이터...Global feats 데이터
         # 위와 같은 방식으로 뒤로 갈수록 더 큰 범주의 특징이 나옵니다.
         for feat in comp_feats_list:
+            # 작은 해상도 특징을 왜곡 없이 상위로 전달
             result_feats_list.append(F.interpolate(feat, size=(target_h, target_w), mode='nearest'))
 
         # 특징 정보들 torch concat
