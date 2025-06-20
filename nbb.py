@@ -4,7 +4,28 @@ import torch.nn.functional as F
 from torchvision.ops import StochasticDepth
 
 
-# todo residual 시 + 말고 concat -> 1x1 conv 로 해보기
+class SEBlock(nn.Module):
+    def __init__(self, channels):
+        super(SEBlock, self).__init__()
+        self.channels = channels
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+
+        hidden_dim = channels // 2
+        self.fc = nn.Sequential(
+            nn.Linear(channels, hidden_dim, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, channels, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        y = self.avg_pool(x).view(b, c)  # (B, C)
+        y = self.fc(y).view(b, c, 1, 1)  # (B, C, 1, 1)
+        return x * y
+
+
+# todo residual 역전파 지름길을 아예 처음부터 끝까지 흑백 이미지로 연결하기
 class EssenceNet(nn.Module):
     def __init__(self):
         super().__init__()
@@ -59,6 +80,12 @@ class EssenceNet(nn.Module):
             StochasticDepth(p, mode='row') for p in drop_probs
         ])
 
+        self.se_blocks = nn.ModuleList()
+        for block in self.comp_feat_blocks:
+            conv_layers = [l for l in block.children() if isinstance(l, nn.Conv2d)]
+            out_ch = conv_layers[-1].out_channels
+            self.se_blocks.append(SEBlock(out_ch))
+
     def _double_conv_block(self, in_ch, mid_ch, out_ch, ks, strd, pdd):
         return nn.Sequential(
             # 평면당 형태를 파악
@@ -89,13 +116,17 @@ class EssenceNet(nn.Module):
         # 멀티 스케일 형태 정보 추출
         x_in = gray_feats
         comp_feats_list = []
-        for i, (block, res_conv, drop_path, post_bn_act) in enumerate(
-                zip(self.comp_feat_blocks, self.residual_convs, self.drop_paths, self.post_bn_activations)
+        for i, (block, res_conv, drop_path, post_bn_act, se_block) in enumerate(
+                zip(self.comp_feat_blocks, self.residual_convs, self.drop_paths, self.post_bn_activations,
+                    self.se_blocks)
         ):
             x_out = block(x_in)
+            # 채널 중 중요한 채널을 강조
+            x_out = se_block(x_out)
             res = res_conv(x_in)
             if res.shape[2:] != x_out.shape[2:]:
                 res = F.interpolate(res, size=x_out.shape[2:], mode='nearest')
+            # 이전 결과값과 이번 결과값이 크게 나타나는 곳을 강조 및 역전파 지름길 만들기
             x_in = drop_path(x_out + res)
             x_in = post_bn_act(x_in)
             comp_feats_list.append(x_in)
