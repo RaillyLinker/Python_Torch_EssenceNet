@@ -42,18 +42,18 @@ class EssenceNet(nn.Module):
             self._double_conv_block(24, 64, 32, 3, 2, 1),  # 80x80 -> 40x40
             # 31x31 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지 + 자유로운 선 + 패턴 + 제한된 도형 = 픽셀 아트 영역
-            self._double_conv_block(32, 80, 48, 3, 2, 1),  # 40x40 -> 20x20
+            self._mb_conv_block(32, 80, 48, 3, 2, 1),  # 40x40 -> 20x20
             # 63x63 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지 + 자유로운 선 + 패턴 + 도형 = 픽셀 아트 영역
-            self._double_conv_block(48, 96, 64, 3, 2, 1),  # 20x20 -> 10x10
+            self._mb_conv_block(48, 96, 64, 3, 2, 1),  # 20x20 -> 10x10
             # 127x127 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지 + 자유로운 선 + 패턴 + 자유로운 도형 + 질감 = 실사 이미지
-            self._double_conv_block(64, 112, 80, 3, 2, 1),  # 10x10 -> 5x5
+            self._mb_conv_block(64, 112, 80, 3, 2, 1),  # 10x10 -> 5x5
             # 255x255 픽셀 단위 특징 검출
             # 아래부터는 추상적 정보
-            self._double_conv_block(80, 128, 96, 3, 2, 1),  # 5x5 -> 3x3
+            self._mb_conv_block(80, 128, 96, 3, 2, 1),  # 5x5 -> 3x3
             # 320x320 픽셀 단위 특징 검출
-            self._double_conv_block(96, 144, 112, 3, 1, 0)  # 3x3 -> 1x1
+            self._mb_conv_block(96, 144, 112, 3, 1, 0)  # 3x3 -> 1x1
         ])
 
         # Residual 연결을 위한 1x1 conv 계층
@@ -86,6 +86,7 @@ class EssenceNet(nn.Module):
             out_ch = conv_layers[-1].out_channels
             self.se_blocks.append(SEBlock(out_ch))
 
+    # todo 완전 Efficient Net 형식으로 해보기(중간에 SE)
     def _double_conv_block(self, in_ch, mid_ch, out_ch, ks, strd, pdd):
         return nn.Sequential(
             # 평면당 형태를 파악
@@ -94,6 +95,24 @@ class EssenceNet(nn.Module):
             nn.SiLU(),
 
             # 채널간 패턴 분석
+            nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.SiLU()
+        )
+
+    def _mb_conv_block(self, in_ch, mid_ch, out_ch, ks, strd, pdd):
+        return nn.Sequential(
+            # 채널 증가
+            nn.Conv2d(in_ch, mid_ch, kernel_size=1, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(mid_ch),
+            nn.SiLU(),
+
+            # 채널별 형태 파악
+            nn.Conv2d(mid_ch, mid_ch, kernel_size=ks, stride=strd, padding=pdd, groups=mid_ch, bias=False),
+            nn.BatchNorm2d(mid_ch),
+            nn.SiLU(),
+
+            # 채널간 패턴 파악
             nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
             nn.BatchNorm2d(out_ch),
             nn.SiLU()
@@ -152,14 +171,16 @@ class UpsampleConcatClassifier(nn.Module):
         super().__init__()
         self.backbone = EssenceNet()
 
-        # 더미 입력
+        # 더미 입력으로 피쳐맵 정보 파악
         dummy_input = torch.zeros(2, 3, 320, 320)
         with torch.no_grad():
             feats = self.backbone(dummy_input)
 
         self.reducers = nn.ModuleList()
+        total_channels = 0
         for feat in feats:
             _, c, h, w = feat.shape
+            total_channels += c
             if h == 1 and w == 1:
                 self.reducers.append(nn.Identity())
             elif h == w:
@@ -167,24 +188,33 @@ class UpsampleConcatClassifier(nn.Module):
             else:
                 raise ValueError(f"Unsupported feature map size: {h}x{w}")
 
-        total_channels = sum([feat.shape[1] for feat in feats])
+        # SEBlock: total_channels 기준으로 동작
+        self.se = SEBlock(total_channels)
 
+        # 분류기
         self.classifier = nn.Sequential(
             nn.Linear(total_channels, total_channels // 2),
             nn.BatchNorm1d(total_channels // 2),
             nn.SiLU(),
-            nn.Dropout(p=0.5),
+            nn.Dropout(0.5),
             nn.Linear(total_channels // 2, num_classes)
         )
 
     def forward(self, x):
         feats = self.backbone(x)
-        reduced_feats = [reducer(feat) for feat, reducer in zip(feats, self.reducers)]
-        x = torch.cat(reduced_feats, dim=1)  # [B, total_channels, 1, 1]
-        x = x.flatten(1)  # [B, total_channels]
-        return self.classifier(x)  # [B, num_classes]
 
-# from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
+        # 레이어별 특징 avg pooling 및 연결
+        reduced_feats = [reducer(feat) for feat, reducer in zip(feats, self.reducers)]
+        x = torch.cat(reduced_feats, dim=1)
+
+        # 연결된 특징들간 중요도 파악
+        x = self.se(x)
+
+        # Flatten 후 분류
+        x = x.flatten(1)
+        return self.classifier(x)
+
+    # from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
 #
 #
 # class UpsampleConcatClassifier(nn.Module):
