@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torchvision.ops import StochasticDepth
 
 
+# todo : 파라미터 증량 및 SEBlock channels 나누는 값을 2 로 줄여보기
 class SEBlock(nn.Module):
     def __init__(self, channels):
         super(SEBlock, self).__init__()
@@ -85,7 +86,6 @@ class EssenceNet(nn.Module):
             out_ch = conv_layers[-1].out_channels
             self.se_blocks.append(SEBlock(out_ch))
 
-    # todo 완전 Efficient Net 형식으로 해보기(중간에 SE)
     def _double_conv_block(self, in_ch, mid_ch, out_ch, ks, strd, pdd):
         return nn.Sequential(
             # 평면당 형태를 파악
@@ -94,24 +94,6 @@ class EssenceNet(nn.Module):
             nn.SiLU(),
 
             # 채널간 패턴 분석
-            nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
-            nn.BatchNorm2d(out_ch),
-            nn.SiLU()
-        )
-
-    def _mb_conv_block(self, in_ch, mid_ch, out_ch, ks, strd, pdd):
-        return nn.Sequential(
-            # 채널 증가
-            nn.Conv2d(in_ch, mid_ch, kernel_size=1, stride=1, padding=0, bias=False),
-            nn.BatchNorm2d(mid_ch),
-            nn.SiLU(),
-
-            # 채널별 형태 파악
-            nn.Conv2d(mid_ch, mid_ch, kernel_size=ks, stride=strd, padding=pdd, groups=mid_ch, bias=False),
-            nn.BatchNorm2d(mid_ch),
-            nn.SiLU(),
-
-            # 채널간 패턴 파악
             nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
             nn.BatchNorm2d(out_ch),
             nn.SiLU()
@@ -147,7 +129,8 @@ class EssenceNet(nn.Module):
             # 특징 추출
             x_out = block(x_in)
 
-            # 다음 특징 추출에 중요한 채널을 강조(채널이 무분별하게 늘어났을 때 방지 효과)
+            # 다음 특징 추출에 중요한 채널을 강조
+            # 채널이 무분별하게 늘어났을 때 방지 효과도 됩니다.
             x_out = se_block(x_out)
 
             # 레이어 반환 특징맵 저장
@@ -159,8 +142,14 @@ class EssenceNet(nn.Module):
                 x_in = F.interpolate(x_in, size=x_out.shape[2:], mode='area')
 
             x_in = res_conv(x_in)  # 채널 크기 맞추기
-            x_in = drop_path(x_out + x_in)  # 이전 특징들 합치기
-            x_in = post_bn_act(x_in)  # 값 정규화
+
+            # gray_feats 를 Residual 에 추가하여 경로 축소 극대화 및 이전 레이어 분석시 제거된 특성 재입력
+            gray_feats = F.interpolate(gray_feats, size=x_out.shape[2:], mode='area')
+            if i > 0:
+                gray_in = gray_feats.repeat(1, x_out.shape[1], 1, 1)
+                x_in = drop_path(x_out + x_in + gray_in)
+            else:
+                x_in = drop_path(x_out + x_in)
 
         return result_feats_list
 
