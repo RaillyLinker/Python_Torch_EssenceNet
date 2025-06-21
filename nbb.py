@@ -4,14 +4,13 @@ import torch.nn.functional as F
 from torchvision.ops import StochasticDepth
 
 
-# todo : 파라미터 증량 및 SEBlock channels 나누는 값을 2 로 줄여보기
 class SEBlock(nn.Module):
     def __init__(self, channels):
         super(SEBlock, self).__init__()
         self.channels = channels
         self.avg_pool = nn.AdaptiveAvgPool2d(1)
 
-        hidden_dim = channels // 4
+        hidden_dim = channels // 2
         self.fc = nn.Sequential(
             nn.Linear(channels, hidden_dim, bias=False),
             nn.SiLU(),
@@ -155,70 +154,132 @@ class EssenceNet(nn.Module):
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-class CrossScaleAttention(nn.Module):
-    def __init__(self, query_dim, context_dim):
+class CrossScaleAttentionMultiHead(nn.Module):
+    def __init__(self, query_dim, context_dim, embed_dim, num_heads, dropout):
         super().__init__()
-        self.q_proj = nn.Linear(query_dim, query_dim)
-        self.k_proj = nn.Linear(context_dim, query_dim)
-        self.v_proj = nn.Linear(context_dim, query_dim)
-        self.out_proj = nn.Linear(query_dim, context_dim)
-        self.softmax = nn.Softmax(dim=-1)
+        self.q_proj = nn.Linear(query_dim, embed_dim)
+        self.k_proj = nn.Linear(context_dim, embed_dim)
+        self.v_proj = nn.Linear(context_dim, embed_dim)
+        self.attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
+        self.out_proj = nn.Linear(embed_dim, context_dim)
 
     def forward(self, q_feat, context_feat):
         B, C, H, W = context_feat.shape
         N = H * W
+        # project
+        q = self.q_proj(q_feat).unsqueeze(1)  # (B,1,embed)
+        ctx = context_feat.view(B, C, -1).permute(0, 2, 1)  # (B,N,C)
+        k = self.k_proj(ctx)  # (B,N,embed)
+        v = self.v_proj(ctx)
+        # attention
+        attn_out, _ = self.attn(q, k, v)  # (B,1,embed)
+        out = self.out_proj(attn_out).view(B, C, 1, 1)
+        out = F.interpolate(out, size=(H, W), mode='nearest')
+        return context_feat + out
 
-        q = self.q_proj(q_feat).unsqueeze(1)  # (B, 1, C)
-        kv = context_feat.flatten(2).permute(0, 2, 1)  # (B, N, C)
-        k = self.k_proj(kv)  # (B, N, C)
-        v = self.v_proj(kv)  # (B, N, C)
 
-        attn = self.softmax((q @ k.transpose(-2, -1)) / (C ** 0.5))  # (B, 1, N)
-        out = attn @ v  # (B, 1, C)
-        out = self.out_proj(out).view(B, C, 1, 1)
-        out = F.interpolate(out, size=(H, W), mode='nearest')  # broadcast to match context
-        return context_feat + out  # residual 방식
-
-
-class UpsampleConcatClassifier(nn.Module):
-    def __init__(self, num_classes: int):
+class TransformerFusion(nn.Module):
+    def __init__(self, embed_dim, num_heads=4, num_layers=1, dropout=0.1):
         super().__init__()
-        channels_per_feature = [3, 16, 24, 32, 48, 64, 80, 96, 112]
-
-        self.backbone = EssenceNet()
-        self.reducers = nn.ModuleList([
-            nn.AdaptiveAvgPool2d(1) for _ in channels_per_feature
-        ])
-        self.cross_attentions = nn.ModuleList()
-        for i in range(len(channels_per_feature) - 1):
-            q_dim = channels_per_feature[i]
-            ctx_dim = channels_per_feature[i + 1]
-            self.cross_attentions.append(CrossScaleAttention(q_dim, ctx_dim))
-
-        self.total_channels = sum(channels_per_feature)
-        self.classifier = nn.Sequential(
-            nn.Linear(self.total_channels, self.total_channels // 2),
-            nn.BatchNorm1d(self.total_channels // 2),
-            nn.SiLU(),
-            nn.Dropout(0.5),
-            nn.Linear(self.total_channels // 2, num_classes)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim, nhead=num_heads,
+            dim_feedforward=embed_dim * 4, dropout=dropout,
+            activation='gelu', batch_first=True
         )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.layer_norm = nn.LayerNorm(embed_dim)
 
     def forward(self, x):
-        feats = self.backbone(x)
+        x = self.encoder(x)
+        return self.layer_norm(x)
 
-        fused_feats = [self.reducers[0](feats[0]).flatten(1)]  # 1x1 global as query
-        q_feat = fused_feats[0]
-        for i in range(1, len(feats)):
-            context_feat = feats[i]
-            q_feat_broadcast = q_feat  # (B, C)
-            fused_context = self.cross_attentions[i - 1](q_feat_broadcast, context_feat)
-            reduced = self.reducers[i](fused_context).flatten(1)
-            fused_feats.append(reduced)
-            q_feat = reduced  # update for next level
 
-        x = torch.cat(fused_feats, dim=1)
-        return self.classifier(x)
+class EssenceNetClassifier(nn.Module):
+    def __init__(
+            self, num_classes: int,
+            embed_dim: int = 128,
+            num_heads: int = 4,
+            dropout: float = 0.1
+    ):
+        super().__init__()
+        self.backbone = EssenceNet()
+        self.channels = [3, 16, 24, 32, 48, 64, 80, 96, 112]
+        self.channels_rev = self.channels[::-1]
+        # pooling & attention
+        self.reducers = nn.ModuleList([nn.AdaptiveAvgPool2d(1) for _ in self.channels_rev])
+        self.cross_attns = nn.ModuleList([
+            CrossScaleAttentionMultiHead(
+                query_dim=self.channels_rev[i - 1] if i > 0 else self.channels_rev[0],
+                context_dim=self.channels_rev[i],
+                embed_dim=embed_dim,
+                num_heads=num_heads,
+                dropout=dropout
+            ) for i in range(len(self.channels_rev))
+        ])
+        # scale embedding
+        self.scale_embed = nn.Embedding(len(self.channels_rev), embed_dim)
+        self.scale_projs = nn.ModuleList([
+            nn.Linear(ch, embed_dim) for ch in self.channels_rev
+        ])
+        # cls token
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        # fusion transformer
+        self.fusion = TransformerFusion(embed_dim, num_heads, num_layers=1, dropout=dropout)
+        # classifier
+        total_dim = embed_dim * (1 + len(self.channels_rev))  # cls + all scales
+        self.classifier = nn.Sequential(
+            nn.LayerNorm(total_dim),
+            nn.Linear(total_dim, embed_dim * 2),
+            nn.GELU(),
+            nn.Dropout(0.5),
+            nn.Linear(embed_dim * 2, num_classes)
+        )
+        self.concat_proj = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(embed_dim * 2, embed_dim),
+                nn.GELU(),
+                nn.LayerNorm(embed_dim)
+            )
+            for _ in self.channels_rev
+        ])
+
+    def forward(self, x):
+        feats = self.backbone(x)[::-1]
+        B = x.size(0)
+        # cross-scale attention and pooling
+        fused = []
+        for i, feat in enumerate(feats):
+            if i == 0:
+                # first scale: no attention
+                pooled = self.reducers[i](feat).flatten(1)
+                fused.append(pooled)
+            else:
+                prev = fused[-1]
+                attn_feat = self.cross_attns[i](prev, feat)
+                pooled = self.reducers[i](attn_feat).flatten(1)
+                fused.append(pooled)
+        # project + scale embed
+        proj = []
+        for i, vec in enumerate(fused):
+            idx = torch.full((B,), i, dtype=torch.long, device=x.device)
+            scale_emb = self.scale_embed(idx)  # (B, embed_dim)
+            vec_proj = self.scale_projs[i](vec)  # (B, embed_dim)
+
+            # concat along feature dimension: (B, 2 * embed_dim)
+            concat_feat = torch.cat([vec_proj, scale_emb], dim=-1)
+
+            # pass through MLP
+            p = self.concat_proj[i](concat_feat)  # (B, embed_dim)
+            proj.append(p)
+        # build sequence: cls + tokens
+        cls = self.cls_token.expand(B, -1, -1)
+        seq = torch.stack(proj, dim=1)
+        seq = torch.cat([cls, seq], dim=1)
+        # transformer fusion
+        out = self.fusion(seq)
+        out = out.flatten(1)
+        return self.classifier(out)
 
 # from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
 #

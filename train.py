@@ -14,7 +14,7 @@ from torchvision import transforms
 from torchvision.transforms import ColorJitter, RandomErasing
 from tqdm import tqdm
 
-from nbb import UpsampleConcatClassifier
+from nbb import EssenceNetClassifier
 
 SEED = 42
 random.seed(SEED)
@@ -132,7 +132,7 @@ if __name__ == "__main__":
                             persistent_workers=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = UpsampleConcatClassifier(num_classes=101).to(device)
+    model = EssenceNetClassifier(num_classes=101).to(device)
 
     if PRETRAINED_MODEL_PATH and os.path.exists(PRETRAINED_MODEL_PATH):
         model.load_state_dict(torch.load(PRETRAINED_MODEL_PATH, map_location=device))
