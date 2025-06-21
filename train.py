@@ -96,10 +96,10 @@ if __name__ == "__main__":
     # ----------------------------
     # 데이터셋 로드 또는 전처리
     # ----------------------------
-    if os.path.exists("./processed/food101/train") and os.path.exists("./processed/food101/val"):
+    if os.path.exists("F:/dataset/processed_food101/train") and os.path.exists("F:/dataset/processed_food101/val"):
         print("📦 전처리된 데이터셋 로딩 중...")
-        train_ds = load_from_disk("./processed/food101/train")
-        val_ds = load_from_disk("./processed/food101/val")
+        train_ds = load_from_disk("F:/dataset/processed_food101/train")
+        val_ds = load_from_disk("F:/dataset/processed_food101/val")
     else:
         print("⚙️ 전처리 중 (최초 실행 시 1회)...")
         raw_train_ds = load_dataset(
@@ -119,8 +119,8 @@ if __name__ == "__main__":
         train_ds = train_ds.filter(lambda x: x is not None)
         val_ds = val_ds.filter(lambda x: x is not None)
 
-        train_ds.save_to_disk("./processed/food101/train")
-        val_ds.save_to_disk("./processed/food101/val")
+        train_ds.save_to_disk("F:/dataset/processed_food101/train")
+        val_ds.save_to_disk("F:/dataset/processed_food101/val")
         print("✅ 전처리 및 저장 완료.")
 
     train_ds.set_format(type='torch', columns=['pixel_values', 'label'])
