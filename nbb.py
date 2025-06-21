@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.ops import StochasticDepth
-import torchvision.transforms.functional as TF
 
 
 class SEBlock(nn.Module):
