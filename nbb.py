@@ -177,7 +177,7 @@ class EssenceNetClassifier(nn.Module):
         super().__init__()
         self.backbone = EssenceNet()
 
-        dummy_input = torch.zeros(1, 3, 320, 320)
+        dummy_input = torch.zeros(2, 3, 320, 320)
         with torch.no_grad():
             feats = self.backbone(dummy_input)
 
