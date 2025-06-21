@@ -126,7 +126,7 @@ class EssenceNet(nn.Module):
 
         # 분석을 위한 흑백 변환(320x320)
         # 컬러 이미지는 그 자체로 색이란 특징을 지닌 특징 맵이고, 형태 특징을 구하기 위한 입력 값은 흑백으로 충분
-        gray_feats = TF.rgb_to_grayscale(x, num_output_channels=1)
+        gray_feats = (0.2989 * x[:, 0:1, :, :] + 0.5870 * x[:, 1:2, :, :] + 0.1140 * x[:, 2:3, :, :])
 
         # 첫 입력값은 흑백 이미지
         x_in = gray_feats
