@@ -148,8 +148,7 @@ class EssenceNet(nn.Module):
             # 특징 추출
             x_out = block(x_in)
 
-            # 채널 중 중요한 채널을 강조
-            # todo : 특징 응용 단계에서 필요할지 지금 필요할지
+            # 채널 중 중요한 채널을 강조(채널이 무분별하게 늘어났을 때 방지 효과)
             x_out = se_block(x_out)
 
             # 이전 결과값과 이번 결과값이 크게 나타나는 곳을 강조 및 역전파 지름길 만들기
@@ -167,52 +166,69 @@ class EssenceNet(nn.Module):
 
 
 # ----------------------------------------------------------------------------------------------------------------------
+class CrossScaleAttention(nn.Module):
+    def __init__(self, query_dim, context_dim):
+        super().__init__()
+        self.q_proj = nn.Linear(query_dim, query_dim)
+        self.k_proj = nn.Linear(context_dim, query_dim)
+        self.v_proj = nn.Linear(context_dim, query_dim)
+        self.out_proj = nn.Linear(query_dim, context_dim)
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, q_feat, context_feat):
+        B, C, H, W = context_feat.shape
+        N = H * W
+
+        q = self.q_proj(q_feat).unsqueeze(1)  # (B, 1, C)
+        kv = context_feat.flatten(2).permute(0, 2, 1)  # (B, N, C)
+        k = self.k_proj(kv)  # (B, N, C)
+        v = self.v_proj(kv)  # (B, N, C)
+
+        attn = self.softmax((q @ k.transpose(-2, -1)) / (C ** 0.5))  # (B, 1, N)
+        out = attn @ v  # (B, 1, C)
+        out = self.out_proj(out).view(B, C, 1, 1)
+        out = F.interpolate(out, size=(H, W), mode='nearest')  # broadcast to match context
+        return context_feat + out  # residual 방식
+
+
 class UpsampleConcatClassifier(nn.Module):
     def __init__(self, num_classes: int):
         super().__init__()
+        channels_per_feature = [3, 16, 24, 32, 48, 64, 80, 96, 112]
+
         self.backbone = EssenceNet()
+        self.reducers = nn.ModuleList([
+            nn.AdaptiveAvgPool2d(1) for _ in channels_per_feature
+        ])
+        self.cross_attentions = nn.ModuleList()
+        for i in range(len(channels_per_feature) - 1):
+            q_dim = channels_per_feature[i]
+            ctx_dim = channels_per_feature[i + 1]
+            self.cross_attentions.append(CrossScaleAttention(q_dim, ctx_dim))
 
-        # 더미 입력으로 피쳐맵 정보 파악
-        dummy_input = torch.zeros(2, 3, 320, 320)
-        with torch.no_grad():
-            feats = self.backbone(dummy_input)
-
-        self.reducers = nn.ModuleList()
-        total_channels = 0
-        for feat in feats:
-            _, c, h, w = feat.shape
-            total_channels += c
-            if h == 1 and w == 1:
-                self.reducers.append(nn.Identity())
-            elif h == w:
-                self.reducers.append(nn.AdaptiveAvgPool2d(1))
-            else:
-                raise ValueError(f"Unsupported feature map size: {h}x{w}")
-
-        # SEBlock: total_channels 기준으로 동작
-        self.se = SEBlock(total_channels)
-
-        # 분류기
+        self.total_channels = sum(channels_per_feature)
         self.classifier = nn.Sequential(
-            nn.Linear(total_channels, total_channels // 2),
-            nn.BatchNorm1d(total_channels // 2),
+            nn.Linear(self.total_channels, self.total_channels // 2),
+            nn.BatchNorm1d(self.total_channels // 2),
             nn.SiLU(),
             nn.Dropout(0.5),
-            nn.Linear(total_channels // 2, num_classes)
+            nn.Linear(self.total_channels // 2, num_classes)
         )
 
     def forward(self, x):
         feats = self.backbone(x)
 
-        # 레이어별 특징 avg pooling 및 연결
-        reduced_feats = [reducer(feat) for feat, reducer in zip(feats, self.reducers)]
-        x = torch.cat(reduced_feats, dim=1)
+        fused_feats = [self.reducers[0](feats[0]).flatten(1)]  # 1x1 global as query
+        q_feat = fused_feats[0]
+        for i in range(1, len(feats)):
+            context_feat = feats[i]
+            q_feat_broadcast = q_feat  # (B, C)
+            fused_context = self.cross_attentions[i - 1](q_feat_broadcast, context_feat)
+            reduced = self.reducers[i](fused_context).flatten(1)
+            fused_feats.append(reduced)
+            q_feat = reduced  # update for next level
 
-        # 연결된 특징들간 중요도 파악
-        x = self.se(x)
-
-        # Flatten 후 분류
-        x = x.flatten(1)
+        x = torch.cat(fused_feats, dim=1)
         return self.classifier(x)
 
 # from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
