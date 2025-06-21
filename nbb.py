@@ -149,6 +149,7 @@ class EssenceNet(nn.Module):
             x_out = block(x_in)
 
             # 채널 중 중요한 채널을 강조
+            # todo : 특징 응용 단계에서 필요할지 지금 필요할지
             x_out = se_block(x_out)
 
             # 이전 결과값과 이번 결과값이 크게 나타나는 곳을 강조 및 역전파 지름길 만들기
@@ -214,7 +215,7 @@ class UpsampleConcatClassifier(nn.Module):
         x = x.flatten(1)
         return self.classifier(x)
 
-    # from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
+# from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
 #
 #
 # class UpsampleConcatClassifier(nn.Module):
