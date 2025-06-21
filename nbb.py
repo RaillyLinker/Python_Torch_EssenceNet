@@ -42,18 +42,18 @@ class EssenceNet(nn.Module):
             self._double_conv_block(24, 64, 32, 3, 2, 1),  # 80x80 -> 40x40
             # 31x31 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지 + 자유로운 선 + 패턴 + 제한된 도형 = 픽셀 아트 영역
-            self._mb_conv_block(32, 80, 48, 3, 2, 1),  # 40x40 -> 20x20
+            self._double_conv_block(32, 80, 48, 3, 2, 1),  # 40x40 -> 20x20
             # 63x63 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지 + 자유로운 선 + 패턴 + 도형 = 픽셀 아트 영역
-            self._mb_conv_block(48, 96, 64, 3, 2, 1),  # 20x20 -> 10x10
+            self._double_conv_block(48, 96, 64, 3, 2, 1),  # 20x20 -> 10x10
             # 127x127 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지 + 자유로운 선 + 패턴 + 자유로운 도형 + 질감 = 실사 이미지
-            self._mb_conv_block(64, 112, 80, 3, 2, 1),  # 10x10 -> 5x5
+            self._double_conv_block(64, 112, 80, 3, 2, 1),  # 10x10 -> 5x5
             # 255x255 픽셀 단위 특징 검출
             # 아래부터는 추상적 정보
-            self._mb_conv_block(80, 128, 96, 3, 2, 1),  # 5x5 -> 3x3
+            self._double_conv_block(80, 128, 96, 3, 2, 1),  # 5x5 -> 3x3
             # 320x320 픽셀 단위 특징 검출
-            self._mb_conv_block(96, 144, 112, 3, 1, 0)  # 3x3 -> 1x1
+            self._double_conv_block(96, 144, 112, 3, 1, 0)  # 3x3 -> 1x1
         ])
 
         # Residual 연결을 위한 1x1 conv 계층
@@ -148,19 +148,20 @@ class EssenceNet(nn.Module):
             # 특징 추출
             x_out = block(x_in)
 
-            # 채널 중 중요한 채널을 강조(채널이 무분별하게 늘어났을 때 방지 효과)
+            # 다음 특징 추출에 중요한 채널을 강조(채널이 무분별하게 늘어났을 때 방지 효과)
             x_out = se_block(x_out)
 
-            # 이전 결과값과 이번 결과값이 크게 나타나는 곳을 강조 및 역전파 지름길 만들기
-            res = res_conv(x_in)
-            if res.shape[2:] != x_out.shape[2:]:
-                # 부드러운 다운스케일링(평균값 사용)
-                res = F.interpolate(res, size=x_out.shape[2:], mode='area')
-            x_in = drop_path(x_out + res)
-            x_in = post_bn_act(x_in)
-
             # 레이어 반환 특징맵 저장
-            result_feats_list.append(x_in)
+            result_feats_list.append(x_out)
+
+            # 이전 결과값과 이번 결과값이 크게 나타나는 곳을 강조 및 역전파 지름길 만들기
+            if x_in.shape[2:] != x_out.shape[2:]:
+                # 부드러운 다운스케일링(평균값 사용)
+                x_in = F.interpolate(x_in, size=x_out.shape[2:], mode='area')
+
+            x_in = res_conv(x_in)  # 채널 크기 맞추기
+            x_in = drop_path(x_out + x_in)  # 이전 특징들 합치기
+            x_in = post_bn_act(x_in)  # 값 정규화
 
         return result_feats_list
 
