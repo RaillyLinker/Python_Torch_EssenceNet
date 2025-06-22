@@ -25,6 +25,39 @@ class SEBlock(nn.Module):
         return x * y
 
 
+def _double_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd):
+    return nn.Sequential(
+        # 평면당 형태를 파악
+        nn.Conv2d(in_ch, mid_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
+        nn.BatchNorm2d(mid_ch),
+        nn.SiLU(),
+
+        # 채널간 패턴 분석
+        nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
+        nn.BatchNorm2d(out_ch),
+        nn.SiLU()
+    )
+
+
+def _mb_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd):
+    return nn.Sequential(
+        # 채널 증가
+        nn.Conv2d(in_ch, mid_ch, kernel_size=1, stride=1, padding=0, bias=False),
+        nn.BatchNorm2d(mid_ch),
+        nn.SiLU(),
+
+        # 채널별 형태 파악
+        nn.Conv2d(mid_ch, mid_ch, kernel_size=ks, stride=strd, padding=pdd, groups=mid_ch, bias=False),
+        nn.BatchNorm2d(mid_ch),
+        nn.SiLU(),
+
+        # 채널간 패턴 파악
+        nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
+        nn.BatchNorm2d(out_ch),
+        nn.SiLU()
+    )
+
+
 class EssenceNet(nn.Module):
     def __init__(self):
         super().__init__()
@@ -32,27 +65,27 @@ class EssenceNet(nn.Module):
         self.comp_feat_blocks = nn.ModuleList([
             # 3x3 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지
-            self._double_conv_block(3, 32, 16, 3, 2, 1),  # 320x320 -> 160x160
+            _double_conv_block(3, 32, 16, 3, 2, 1),  # 320x320 -> 160x160
             # 7x7 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지 + 직선 + 작은 곡선 = 픽셀 아이콘 영역
-            self._mb_conv_block(16, 64, 32, 3, 2, 1),  # 160x160 -> 80x80
+            _mb_conv_block(16, 64, 32, 3, 2, 1),  # 160x160 -> 80x80
             # 15x15 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지 + 직선 + 곡선 + 패턴 = 픽셀 아이콘 영역
-            self._mb_conv_block(32, 128, 64, 3, 2, 1),  # 80x80 -> 40x40
+            _mb_conv_block(32, 128, 64, 3, 2, 1),  # 80x80 -> 40x40
             # 31x31 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지 + 자유로운 선 + 패턴 + 제한된 도형 = 픽셀 아트 영역
-            self._mb_conv_block(64, 256, 128, 3, 2, 1),  # 40x40 -> 20x20
+            _mb_conv_block(64, 256, 128, 3, 2, 1),  # 40x40 -> 20x20
             # 63x63 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지 + 자유로운 선 + 패턴 + 도형 = 픽셀 아트 영역
-            self._mb_conv_block(128, 512, 256, 3, 2, 1),  # 20x20 -> 10x10
+            _mb_conv_block(128, 512, 256, 3, 2, 1),  # 20x20 -> 10x10
             # 127x127 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지 + 자유로운 선 + 패턴 + 자유로운 도형 + 질감 = 실사 이미지
-            self._mb_conv_block(256, 1024, 512, 3, 2, 1),  # 10x10 -> 5x5
+            _mb_conv_block(256, 1024, 512, 3, 2, 1),  # 10x10 -> 5x5
             # 255x255 픽셀 단위 특징 검출
-            self._mb_conv_block(512, 2048, 1024, 3, 2, 1),  # 5x5 -> 3x3
+            _mb_conv_block(512, 2048, 1024, 3, 2, 1),  # 5x5 -> 3x3
             # 320x320 픽셀 단위 특징 검출
             # 최고 추상 정보
-            self._mb_conv_block(1024, 4096, 2048, 3, 1, 0)  # 3x3 -> 1x1
+            _mb_conv_block(1024, 4096, 2048, 3, 1, 0)  # 3x3 -> 1x1
         ])
 
         # Post-BN + Activation 블록
@@ -77,37 +110,6 @@ class EssenceNet(nn.Module):
             conv_layers = [l for l in block.children() if isinstance(l, nn.Conv2d)]
             out_ch = conv_layers[-1].out_channels
             self.se_blocks.append(SEBlock(out_ch))
-
-    def _double_conv_block(self, in_ch, mid_ch, out_ch, ks, strd, pdd):
-        return nn.Sequential(
-            # 평면당 형태를 파악
-            nn.Conv2d(in_ch, mid_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
-            nn.BatchNorm2d(mid_ch),
-            nn.SiLU(),
-
-            # 채널간 패턴 분석
-            nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
-            nn.BatchNorm2d(out_ch),
-            nn.SiLU()
-        )
-
-    def _mb_conv_block(self, in_ch, mid_ch, out_ch, ks, strd, pdd):
-        return nn.Sequential(
-            # 채널 증가
-            nn.Conv2d(in_ch, mid_ch, kernel_size=1, stride=1, padding=0, bias=False),
-            nn.BatchNorm2d(mid_ch),
-            nn.SiLU(),
-
-            # 채널별 형태 파악
-            nn.Conv2d(mid_ch, mid_ch, kernel_size=ks, stride=strd, padding=pdd, groups=mid_ch, bias=False),
-            nn.BatchNorm2d(mid_ch),
-            nn.SiLU(),
-
-            # 채널간 패턴 파악
-            nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
-            nn.BatchNorm2d(out_ch),
-            nn.SiLU()
-        )
 
     def forward(self, x):
         assert x.shape[1] == 3, "Input tensor must have 3 channels (RGB)."
