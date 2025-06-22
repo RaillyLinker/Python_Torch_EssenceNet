@@ -32,36 +32,38 @@ class EssenceNet(nn.Module):
         self.comp_feat_blocks = nn.ModuleList([
             # 3x3 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지
-            self._double_conv_block(1, 32, 16, 3, 2, 1),  # 320x320 -> 160x160
+            self._double_conv_block(3, 32, 16, 3, 2, 1),  # 320x320 -> 160x160
             # 7x7 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지 + 직선 + 작은 곡선 = 픽셀 아이콘 영역
             self._mb_conv_block(16, 64, 32, 3, 2, 1),  # 160x160 -> 80x80
             # 15x15 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지 + 직선 + 곡선 + 패턴 = 픽셀 아이콘 영역
-            self._mb_conv_block(32, 96, 48, 3, 2, 1),  # 80x80 -> 40x40
+            self._mb_conv_block(32, 128, 64, 3, 2, 1),  # 80x80 -> 40x40
             # 31x31 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지 + 자유로운 선 + 패턴 + 제한된 도형 = 픽셀 아트 영역
-            self._mb_conv_block(48, 120, 64, 3, 2, 1),  # 40x40 -> 20x20
+            self._mb_conv_block(64, 256, 128, 3, 2, 1),  # 40x40 -> 20x20
             # 63x63 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지 + 자유로운 선 + 패턴 + 도형 = 픽셀 아트 영역
-            self._mb_conv_block(64, 144, 80, 3, 2, 1),  # 20x20 -> 10x10
+            self._mb_conv_block(128, 384, 256, 3, 2, 1),  # 20x20 -> 10x10
             # 127x127 픽셀 단위 특징 검출
             # 노이즈 + 점 + 에지 + 자유로운 선 + 패턴 + 자유로운 도형 + 질감 = 실사 이미지
-            self._mb_conv_block(80, 168, 96, 3, 2, 1),  # 10x10 -> 5x5
+            self._mb_conv_block(256, 512, 384, 3, 2, 1),  # 10x10 -> 5x5
             # 255x255 픽셀 단위 특징 검출
-            self._mb_conv_block(96, 192, 112, 3, 2, 1),  # 5x5 -> 3x3
+            self._mb_conv_block(384, 1024, 512, 3, 2, 1),  # 5x5 -> 3x3
             # 320x320 픽셀 단위 특징 검출
             # 최고 추상 정보
-            self._mb_conv_block(112, 216, 144, 3, 1, 0)  # 3x3 -> 1x1
+            self._mb_conv_block(512, 2048, 1024, 3, 1, 0)  # 3x3 -> 1x1
         ])
 
         # Residual 연결을 위한 1x1 conv 계층
         self.residual_convs = nn.ModuleList()
+        self.residual_color_convs = nn.ModuleList()
         for block in self.comp_feat_blocks:
             conv_layers = [l for l in block.children() if isinstance(l, nn.Conv2d)]
             in_ch = conv_layers[0].in_channels
             out_ch = conv_layers[-1].out_channels
             self.residual_convs.append(nn.Conv2d(in_ch, out_ch, kernel_size=1, bias=False))
+            self.residual_color_convs.append(nn.Conv2d(3, out_ch, kernel_size=1, bias=False))
 
         # Post-BN + Activation 블록
         self.post_bn_activations = nn.ModuleList()
@@ -119,18 +121,19 @@ class EssenceNet(nn.Module):
     def forward(self, x):
         assert x.shape[1] == 3, "Input tensor must have 3 channels (RGB)."
 
-        # 특징 저장 리스트(320, 160, 80, 40, 20, 10, 5, 3, 1 해상도 피라미트)
-        result_feats_list = [x]  # 컬러 특징 저장
-
         # 분석을 위한 흑백 변환(320x320)
         # 컬러 이미지는 그 자체로 색이란 특징을 지닌 특징 맵이고, 형태 특징을 구하기 위한 입력 값은 흑백으로 충분
-        gray_feats = (0.2989 * x[:, 0:1, :, :] + 0.5870 * x[:, 1:2, :, :] + 0.1140 * x[:, 2:3, :, :])
+        color_feats = x
+
+        # 특징 저장 리스트(320, 160, 80, 40, 20, 10, 5, 3, 1 해상도 피라미트)
+        result_feats_list = [color_feats]  # 컬러 특징 저장
 
         # 첫 입력값은 흑백 이미지
-        x_in = gray_feats
+        x_in = color_feats
         for i, (
                 block,
                 res_conv,
+                res_color_conv,
                 drop_path,
                 post_bn_act,
                 se_block
@@ -138,6 +141,7 @@ class EssenceNet(nn.Module):
             zip(
                 self.comp_feat_blocks,
                 self.residual_convs,
+                self.residual_color_convs,
                 self.drop_paths,
                 self.post_bn_activations,
                 self.se_blocks
@@ -160,11 +164,11 @@ class EssenceNet(nn.Module):
 
             x_in = res_conv(x_in)  # 채널 크기 맞추기
 
-            # gray_feats 를 Residual 에 추가하여 경로 축소 극대화 및 이전 레이어 분석시 제거된 특성 재입력
-            gray_feats = F.interpolate(gray_feats, size=x_out.shape[2:], mode='area')
+            # color_feats 를 Residual 에 추가하여 경로 축소 극대화 및 이전 레이어 분석시 제거된 특성 재입력
+            color_feats = F.interpolate(color_feats, size=x_out.shape[2:], mode='area')
             if i > 0:
-                gray_in = gray_feats.repeat(1, x_out.shape[1], 1, 1)
-                x_in = drop_path(x_out + x_in + gray_in)
+                color_in = res_color_conv(color_feats)
+                x_in = drop_path(x_out + x_in + color_in)
             else:
                 x_in = drop_path(x_out + x_in)
 
@@ -197,6 +201,9 @@ class EssenceNetClassifier(nn.Module):
     def forward(self, x):
         feats = self.backbone(x)
         pooled_feats = []
+        # 전체 공간에서 모든 특징에 대해 평균 값을 구해서 MLP 로 파악합니다.
+        # 만약 일정 범위라면 해당 범위에 해당하는 구역의 값을 평균내서 일자로 만들어 파악하면 되며,
+        # 픽셀단위 이미지 세그먼트는 픽셀단위 일자로 분리해 판단
         for f in feats:
             if f.shape[2:] != (1, 1):
                 p = F.adaptive_avg_pool2d(f, 1)

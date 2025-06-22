@@ -91,6 +91,7 @@ def apply_transform(example, mode):
 
 
 if __name__ == "__main__":
+    # 확인 방법 : >> tensorboard --logdir=runs
     writer = SummaryWriter(log_dir="runs/exp1")
 
     # ----------------------------
@@ -213,9 +214,16 @@ if __name__ == "__main__":
         return total_loss / total_samples, total_correct / total_samples, inference_time, avg_inf_time
 
 
-    def interpolate_weight_decay(epoch, max_epoch, min_wd=1e-6, max_wd=1e-4):
-        alpha = epoch / max_epoch
-        return (1 - alpha) * min_wd + alpha * max_wd
+    def dynamic_weight_decay(val_loss, prev_val_loss, min_wd=1e-5, max_wd=1e-2):
+        if prev_val_loss is None:
+            return min_wd
+
+        if val_loss > prev_val_loss + 0.01:
+            delta = min(val_loss - prev_val_loss, 0.5)  # 최대 변화 제한
+            ratio = delta / 0.5  # 0~1 사이로 정규화
+            return (1 - ratio) * min_wd + ratio * max_wd
+        else:
+            return min_wd
 
 
     # ----------------------------
@@ -226,15 +234,18 @@ if __name__ == "__main__":
     no_improve_epochs = 0
     patience = 5
     max_epochs = 30
+    prev_val_loss = None
 
     for epoch in range(1, max_epochs + 1):
-        new_wd = interpolate_weight_decay(epoch, max_epochs)
-        for param_group in optimizer.param_groups:
-            param_group['weight_decay'] = new_wd
-
         print(f"\n===== Epoch {epoch} =====")
         train_loss, train_acc = train_epoch(model, train_loader, optimizer, device, scaler, use_mixup=True)
         val_loss, val_acc, val_time, avg_inf_time = eval_epoch(model, val_loader, device)
+
+        new_wd = dynamic_weight_decay(val_loss, prev_val_loss)
+        for param_group in optimizer.param_groups:
+            param_group['weight_decay'] = new_wd
+        prev_val_loss = val_loss
+
         scheduler.step()
 
         writer.add_scalar('Loss/Train', train_loss, epoch)
