@@ -55,6 +55,8 @@ class EssenceNet(nn.Module):
             self._mb_conv_block(1024, 4096, 2048, 3, 1, 0)  # 3x3 -> 1x1
         ])
 
+        # Post-BN + Activation 블록
+        self.post_bn_activations = nn.ModuleList()
         # Residual 연결을 위한 1x1 conv 계층
         self.residual_convs = nn.ModuleList()
         self.residual_color_convs = nn.ModuleList()
@@ -64,22 +66,11 @@ class EssenceNet(nn.Module):
             out_ch = conv_layers[-1].out_channels
             self.residual_convs.append(nn.Conv2d(in_ch, out_ch, kernel_size=1, bias=False))
             self.residual_color_convs.append(nn.Conv2d(3, out_ch, kernel_size=1, bias=False))
-
-        # Post-BN + Activation 블록
-        self.post_bn_activations = nn.ModuleList()
-        for block in self.comp_feat_blocks:
-            conv_layers = [l for l in block.children() if isinstance(l, nn.Conv2d)]
-            out_ch = conv_layers[-1].out_channels
-            self.post_bn_activations.append(nn.Sequential(
-                nn.BatchNorm2d(out_ch),
-                nn.SiLU()
-            ))
+            self.post_bn_activations.append(nn.Sequential(nn.BatchNorm2d(out_ch), nn.SiLU()))
 
         num_blocks = len(self.comp_feat_blocks)
         drop_probs = [float(i) / num_blocks * 0.2 for i in range(num_blocks)]
-        self.drop_paths = nn.ModuleList([
-            StochasticDepth(p, mode='row') for p in drop_probs
-        ])
+        self.drop_paths = nn.ModuleList([StochasticDepth(p, mode='row') for p in drop_probs])
 
         self.se_blocks = nn.ModuleList()
         for block in self.comp_feat_blocks:
