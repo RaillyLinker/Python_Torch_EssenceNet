@@ -128,6 +128,16 @@ class EssenceNet(nn.Module):
         # 특징 저장 리스트(320, 160, 80, 40, 20, 10, 5, 3, 1 해상도 피라미트)
         result_feats_list = [color_feats]  # 컬러 특징 저장
 
+        zipped = list(zip(
+            self.comp_feat_blocks,
+            self.residual_convs,
+            self.residual_color_convs,
+            self.drop_paths,
+            self.post_bn_activations,
+            self.se_blocks
+        ))
+        zipped_last_idx = len(zipped) - 1
+
         # 첫 입력값은 흑백 이미지
         x_in = color_feats
         for i, (
@@ -137,25 +147,18 @@ class EssenceNet(nn.Module):
                 drop_path,
                 post_bn_act,
                 se_block
-        ) in enumerate(
-            zip(
-                self.comp_feat_blocks,
-                self.residual_convs,
-                self.residual_color_convs,
-                self.drop_paths,
-                self.post_bn_activations,
-                self.se_blocks
-            )
-        ):
+        ) in enumerate(zipped):
             # 특징 추출
             x_out = block(x_in)
 
-            # 다음 특징 추출에 중요한 채널을 강조
-            # 채널이 무분별하게 늘어났을 때 방지 효과도 됩니다.
-            x_out = se_block(x_out)
-
             # 레이어 반환 특징맵 저장
             result_feats_list.append(x_out)
+
+            if i == zipped_last_idx:
+                break
+
+            # 다음 특징 추출에 중요한 채널을 강조
+            x_out = se_block(x_out)
 
             # 이전 결과값과 이번 결과값이 크게 나타나는 곳을 강조 및 역전파 지름길 만들기
             if x_in.shape[2:] != x_out.shape[2:]:
