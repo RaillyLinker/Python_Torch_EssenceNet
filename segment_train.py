@@ -65,8 +65,8 @@ transform = transforms.Compose([
 ])
 
 train_dataset = COCOSegmentationDataset(
-    root='F:/dataset/coco/train2017',
-    annFile='F:/dataset/coco/annotations/instances_train2017.json',
+    root='C:/dataset/coco/train2017',
+    annFile='C:/dataset/coco/annotations/instances_train2017.json',
     transform=transform
 )
 
@@ -78,8 +78,8 @@ val_transform = transforms.Compose([
 ])
 
 val_dataset = COCOSegmentationDataset(
-    root='F:/dataset/coco/val2017',
-    annFile='F:/dataset/coco/annotations/instances_val2017.json',
+    root='C:/dataset/coco/val2017',
+    annFile='C:/dataset/coco/annotations/instances_val2017.json',
     transform=val_transform
 )
 
