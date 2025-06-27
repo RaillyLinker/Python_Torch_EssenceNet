@@ -23,29 +23,23 @@ class EssenceNet(nn.Module):
         # 레이어 하나당 커널수(2배수)
         self.exp_space = 64
 
-        self.feat_blocks = [
-            (_single_conv_block(1, self.exp_space, 3, 1, 1), 256),
-            (_single_conv_block(1, self.exp_space, 3, 1, 1), 128),
-            (_single_conv_block(1, self.exp_space, 3, 1, 1), 64),
-            (_single_conv_block(1, self.exp_space, 3, 1, 1), 32),
-            (_single_conv_block(1, self.exp_space, 3, 1, 1), 16),
-            (_single_conv_block(1, self.exp_space, 3, 1, 1), 8),
-            (_single_conv_block(1, self.exp_space, 3, 1, 1), 4),
-            (_single_conv_block(1, self.exp_space, 3, 1, 1), 2),
-        ]
-
-        # 3x3 -> 1x1
-        self.global_conv = _single_conv_block(1, self.exp_space, 3, 1, 0)
+        # 256x256
+        self.stem_conv = _single_conv_block(1, self.exp_space, 3, 1, 1)
 
     def forward(self, x):
         assert x.shape[1] == 3, "Input tensor must have 3 channels (RGB)."
 
+        _, _, h, w = x.shape
+
+        assert h == w, "Input h and w must be same"
+        assert h % 2 == 0, "Input h must be even"
+
         # 컬러 이미지
-        # (B, 3, 256, 256)
+        # (B, 3, h, w)
         color_feats = x
 
         # 형태 분석을 위한 흑백 이미지
-        # (B, 1, 256, 256)
+        # (B, 1, h, w)
         gray_feats = (
             (color_feats * torch.tensor(
                 [0.299, 0.587, 0.114], device=color_feats.device).view(1, 3, 1, 1)
@@ -55,21 +49,14 @@ class EssenceNet(nn.Module):
         # 특징 저장 리스트(사이즈 별 특징 피라미트, 지역 -> 전역)
         result_feats_list = []
 
-        # 멀티 스케일 특징 추출
-        # (B, self.exp_space, N, N)
-        for conv_block, size in self.feat_blocks:
-            # (B, self.exp_space, size, size)
-            conv_feats = conv_block(F.interpolate(gray_feats, size=(size, size), mode='area'))
-            # 채널 개수 : 3 + self.exp_space
-            conv_feats = torch.cat([F.interpolate(color_feats, size=(size, size), mode='area'), conv_feats], dim=1)
-            result_feats_list.append(conv_feats)
+        # (B, self.exp_space, h, w)
+        conv_feats = self.stem_conv(gray_feats)
+        result_feats_list.append(torch.cat([color_feats, conv_feats], dim=1))
 
-        # global 특징 추출
-        # (B, self.exp_space, 1, 1)
-        conv_feats = self.global_conv(F.interpolate(gray_feats, size=(3, 3), mode='area'))
-        # 채널 개수 : 3 + self.exp_space
-        conv_feats = torch.cat([F.interpolate(color_feats, size=(1, 1), mode='area'), conv_feats], dim=1)
-        result_feats_list.append(conv_feats)
+        while conv_feats.shape[2] % 2 == 0:
+            conv_feats = F.interpolate(conv_feats, scale_factor=0.5, mode='area')
+            color_feats = F.interpolate(color_feats, scale_factor=0.5, mode='area')
+            result_feats_list.append(torch.cat([color_feats, conv_feats], dim=1))
 
         # 출력 : (레이어별 임베딩 벡터 사이즈, 피쳐 피라미드(지역 -> 전역))
         return 3 + self.exp_space, result_feats_list
