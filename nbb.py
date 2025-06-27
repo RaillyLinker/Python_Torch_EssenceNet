@@ -52,7 +52,7 @@ class EssenceNet(nn.Module):
              ).sum(dim=1, keepdim=True)
         )
 
-        # 특징 저장 리스트(사이즈 별 특징 피라미트, 전역 -> 지역)
+        # 특징 저장 리스트(사이즈 별 특징 피라미트, 지역 -> 전역)
         result_feats_list = []
 
         # 멀티 스케일 특징 추출
@@ -81,7 +81,7 @@ class EssenceNetClassifier(nn.Module):
         super().__init__()
         self.backbone = EssenceNet()
 
-        dummy_input = torch.zeros(2, 3, 320, 320)
+        dummy_input = torch.zeros(2, 3, 256, 256)
         with torch.no_grad():
             feats = self.backbone(dummy_input)
 
