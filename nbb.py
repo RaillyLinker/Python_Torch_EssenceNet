@@ -71,11 +71,11 @@ class EssenceNet(nn.Module):
         conv_feats = torch.cat([F.interpolate(color_feats, size=(1, 1), mode='area'), conv_feats], dim=1)
         result_feats_list.append(conv_feats)
 
-        return result_feats_list
+        # 출력 : (레이어별 임베딩 벡터 사이즈, 피쳐 피라미드(지역 -> 전역))
+        return 3 + self.exp_space, result_feats_list
 
 
 # ----------------------------------------------------------------------------------------------------------------------
-# todo : EssenceNet 에서 반환된 피쳐 피라미드를 어텐션으로 헤드 구성
 class EssenceNetClassifier(nn.Module):
     def __init__(self, num_classes):
         super().__init__()
