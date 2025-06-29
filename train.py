@@ -98,11 +98,11 @@ if __name__ == "__main__":
     # 데이터셋 로드 또는 전처리
     # ----------------------------
     if os.path.exists("C:/dataset/processed_food101/train") and os.path.exists("C:/dataset/processed_food101/val"):
-        print("📦 전처리된 데이터셋 로딩 중...")
+        print("전처리된 데이터셋 로딩 중...")
         train_ds = load_from_disk("C:/dataset/processed_food101/train")
         val_ds = load_from_disk("C:/dataset/processed_food101/val")
     else:
-        print("⚙️ 전처리 중 (최초 실행 시 1회)...")
+        print("전처리 중 (최초 실행 시 1회)...")
         raw_train_ds = load_dataset(
             "food101",
             split="train",
@@ -114,15 +114,15 @@ if __name__ == "__main__":
             # split="validation[:50]"
         )
 
-        train_ds = raw_train_ds.map(lambda x: apply_transform(x, mode="train"), num_proc=4)
-        val_ds = raw_val_ds.map(lambda x: apply_transform(x, mode="val"), num_proc=4)
+        train_ds = raw_train_ds.map(lambda x: apply_transform(x, mode="train"), num_proc=8)
+        val_ds = raw_val_ds.map(lambda x: apply_transform(x, mode="val"), num_proc=8)
 
-        train_ds = train_ds.filter(lambda x: x is not None, num_proc=4)
-        val_ds = val_ds.filter(lambda x: x is not None, num_proc=4)
+        train_ds = train_ds.filter(lambda x: x is not None, num_proc=8)
+        val_ds = val_ds.filter(lambda x: x is not None, num_proc=8)
 
         train_ds.save_to_disk("C:/dataset/processed_food101/train")
         val_ds.save_to_disk("C:/dataset/processed_food101/val")
-        print("✅ 전처리 및 저장 완료.")
+        print("전처리 및 저장 완료.")
 
     train_ds.set_format(type='torch', columns=['pixel_values', 'label'])
     val_ds.set_format(type='torch', columns=['pixel_values', 'label'])
@@ -266,7 +266,7 @@ if __name__ == "__main__":
                 os.remove(f)
             best_path = f"checkpoints/best_epoch{epoch:02d}_acc{val_acc:.4f}.pth"
             torch.save(model.state_dict(), best_path)
-            print(f"💾 Saved best model as {os.path.basename(best_path)}.")
+            print(f"Saved best model as {os.path.basename(best_path)}.")
         else:
             no_improve_epochs += 1
             if no_improve_epochs >= patience:
