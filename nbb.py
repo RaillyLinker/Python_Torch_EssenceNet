@@ -25,6 +25,9 @@ class EssenceNet(nn.Module):
     def __init__(self):
         super().__init__()
 
+        # 최종 특징맵 채널 개수
+        final_feat_ch = 2048
+
         self.register_buffer("rgb2gray", torch.tensor([0.299, 0.587, 0.114]).view(1, 3, 1, 1))
 
         # todo 채널 변경
@@ -42,6 +45,24 @@ class EssenceNet(nn.Module):
             _single_conv_block(1, 32, 16, 3, 2, 1, 0.05, 5),  # 256x256 -> 128x128
         ])
 
+        total_channels = 0
+        for conv in self.feats_convs:
+            # conv 출력 채널 추출
+            out_ch = None
+            for layer in reversed(list(conv.children())):
+                if isinstance(layer, nn.BatchNorm2d):
+                    out_ch = layer.num_features
+                    break
+            if out_ch is None:
+                raise ValueError("BatchNorm2d layer not found in conv block")
+            total_channels += (3 + out_ch)  # RGB 3 + conv 출력 채널 합산
+
+        self.channel_reduction = nn.Sequential(
+            nn.Conv2d(total_channels, final_feat_ch, kernel_size=1, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(final_feat_ch),
+            nn.SiLU()
+        )
+
     def forward(self, x):
         assert x.shape[1] == 3, "Input tensor must have 3 channels (RGB)."
 
@@ -57,23 +78,23 @@ class EssenceNet(nn.Module):
         # (B, 1, h, w)
         gray_feats = (color_feats * self.rgb2gray.to(x.device, x.dtype)).sum(dim=1, keepdim=True)
 
-        concat_pyramid_feats = None
-        target_h = target_w = None
+        k_feats_list = [conv(gray_feats) for conv in self.feats_convs]
+        k_sizes = [(f.shape[2], f.shape[3]) for f in k_feats_list]
 
-        for idx, conv in enumerate(self.feats_convs):
-            k_feats = conv(gray_feats)
-            _, _, gh, gw = k_feats.shape
+        # color_feats를 k_feats 크기들에 맞게 한꺼번에 리사이즈
+        resized_colors = [F.interpolate(color_feats, size=size, mode='area') for size in k_sizes]
 
-            resized_color = F.interpolate(color_feats, size=(gh, gw), mode='area')
-            feat = torch.cat([resized_color, k_feats], dim=1)
+        # concat 준비
+        feats_list = [torch.cat([rc, kf], dim=1) for rc, kf in zip(resized_colors, k_feats_list)]
 
-            if idx == 0:
-                # 첫 번째 피처맵 해상도 저장
-                target_h, target_w = feat.shape[2:]
-                concat_pyramid_feats = feat  # 초기값
-            else:
-                feat = F.interpolate(feat, size=(target_h, target_w), mode='nearest')
-                concat_pyramid_feats = torch.cat([concat_pyramid_feats, feat], dim=1)
+        # 가장 큰 해상도 기준으로 맞추기
+        target_h, target_w = feats_list[0].shape[2], feats_list[0].shape[3]
+        feats_resized = [F.interpolate(f, size=(target_h, target_w), mode='nearest') for f in feats_list]
+
+        concat_pyramid_feats = torch.cat(feats_resized, dim=1)
+
+        # 1x1 Conv로 채널 수 축소
+        concat_pyramid_feats = self.channel_reduction(concat_pyramid_feats)
 
         return concat_pyramid_feats
 
