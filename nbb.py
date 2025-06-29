@@ -1,14 +1,17 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from dropblock import DropBlock2D
 
 
-def _single_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd):
+def _single_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, drop_prob, block_size):
     return nn.Sequential(
         # 평면당 형태를 파악
         nn.Conv2d(in_ch, mid_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
         nn.BatchNorm2d(mid_ch),
         nn.SiLU(),
+
+        DropBlock2D(drop_prob=drop_prob, block_size=block_size),
 
         # 채널간 패턴 분석
         nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
@@ -24,11 +27,13 @@ class EssenceNet(nn.Module):
 
         self.register_buffer("rgb2gray", torch.tensor([0.299, 0.587, 0.114]).view(1, 3, 1, 1))
 
-        # 동일 커널(같은 형태)로 다른 해상도의 멀티 스케일 분석
-        # todo : out_ch 크기 변경
-        self.feats_conv = _single_conv_block(1, 512, 128, 3, 3, 0)
-
-        # todo : 보다 큰 커널로 멀티 해상도 탐지
+        # 구역별 멀티 스케일 분석
+        # todo : ch 크기 변경
+        self.feats_conv1 = _single_conv_block(1, 256, 64, 3, 3, 0, 0.05, 5)  # 243x243 -> 81x81
+        self.feats_conv2 = _single_conv_block(1, 512, 128, 9, 9, 0, 0.1, 5)  # 243x243 -> 27x27
+        self.feats_conv3 = _single_conv_block(1, 1024, 256, 27, 27, 0, 0.15, 3)  # 243x243 -> 9x9
+        self.feats_conv4 = _single_conv_block(1, 2048, 512, 81, 81, 0, 0.2, 3)  # 243x243 -> 3x3
+        self.feats_conv5 = _single_conv_block(1, 4096, 1024, 243, 243, 0, 0.0, 1)  # 243x243 -> 1x1
 
     def forward(self, x):
         assert x.shape[1] == 3, "Input tensor must have 3 channels (RGB)."
@@ -49,24 +54,40 @@ class EssenceNet(nn.Module):
         # 특징 저장 리스트(사이즈 별 특징 피라미트, 지역 -> 전역)
         result_feats_list = []
 
-        # 3x3 커널 다중 해상도 멀티 스케일 특징 추출
-        current_size = h
-        # cur_size 가 3의 배수이고, 3 이상이면 반복
-        while current_size % 3 == 0 and current_size >= 3:
-            # 3x3 커널 특징 추출(입력값 사이즈의 1/3 출력)
-            resized_gray = F.interpolate(gray_feats, size=(current_size, current_size), mode='area')
-            k3_feats = self.feats_conv(resized_gray)
+        # 3x3 커널 특징 추출
+        k3_feats = self.feats_conv1(gray_feats)
+        _, _, gh, gw = k3_feats.shape
+        result_feats_list.append(
+            torch.cat([F.interpolate(color_feats, size=(gh, gw), mode='area'), k3_feats], dim=1)
+        )
 
-            # 컬러 특징 리사이징(gray_feats 의 사이즈와 동일)
-            _, _, gh, gw = k3_feats.shape
-            resized_color = F.interpolate(color_feats, size=(gh, gw), mode='area')
+        # 9x9 커널 특징 추출
+        k9_feats = self.feats_conv2(gray_feats)
+        _, _, gh, gw = k9_feats.shape
+        result_feats_list.append(
+            torch.cat([F.interpolate(color_feats, size=(gh, gw), mode='area'), k9_feats], dim=1)
+        )
 
-            # resized_color 와 gray_feats 를 합친 특징을 저장
-            merged_feats = torch.cat([resized_color, k3_feats], dim=1)
-            result_feats_list.append(merged_feats)
+        # 27x27 커널 특징 추출
+        k27_feats = self.feats_conv3(gray_feats)
+        _, _, gh, gw = k27_feats.shape
+        result_feats_list.append(
+            torch.cat([F.interpolate(color_feats, size=(gh, gw), mode='area'), k27_feats], dim=1)
+        )
 
-            # cur_size 갱신
-            current_size = current_size // 3
+        # 81x81 커널 특징 추출
+        k81_feats = self.feats_conv4(gray_feats)
+        _, _, gh, gw = k81_feats.shape
+        result_feats_list.append(
+            torch.cat([F.interpolate(color_feats, size=(gh, gw), mode='area'), k81_feats], dim=1)
+        )
+
+        # 243x243 커널 특징 추출
+        k243_feats = self.feats_conv5(gray_feats)
+        _, _, gh, gw = k243_feats.shape
+        result_feats_list.append(
+            torch.cat([F.interpolate(color_feats, size=(gh, gw), mode='area'), k243_feats], dim=1)
+        )
 
         # 가장 큰 해상도 (첫 피쳐맵 기준)
         target_h, target_w = result_feats_list[0].shape[2:]
@@ -94,15 +115,23 @@ class EssenceNetClassifier(nn.Module):
 
         # todo : 히든 벡터 사이즈 변경
         # 분류기 히든 벡터 사이즈
-        classifier_hidden_vector_size = num_classes * 2
+        classifier_hidden_vector_size = num_classes * 4
+        classifier_hidden_vector_size1 = num_classes * 2
 
-        # todo : 레이어 깊이 늘려보기
+        # todo : 레이어 깊이 변경
         # 픽셀별 벡터 → 클래스 logits (MLP처럼 1x1 Conv)
         self.head = nn.Sequential(
             nn.Conv2d(self.feat_dim, classifier_hidden_vector_size, kernel_size=1),
-            nn.ReLU(),
+            nn.BatchNorm2d(classifier_hidden_vector_size),
+            nn.SiLU(),
             nn.Dropout(p=0.5),  # Dropout 확률 조절 가능
-            nn.Conv2d(classifier_hidden_vector_size, num_classes, kernel_size=1)
+
+            nn.Conv2d(classifier_hidden_vector_size, classifier_hidden_vector_size1, kernel_size=1),
+            nn.BatchNorm2d(classifier_hidden_vector_size1),
+            nn.SiLU(),
+            nn.Dropout(p=0.5),  # Dropout 확률 조절 가능
+
+            nn.Conv2d(classifier_hidden_vector_size1, num_classes, kernel_size=1)
         )
 
     def forward(self, x):
