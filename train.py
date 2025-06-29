@@ -60,7 +60,7 @@ class RandomizedGaussianBlur:
 
 
 train_transform = transforms.Compose([
-    transforms.RandomResizedCrop(256, scale=(0.5, 1.0), ratio=(0.75, 1.33)),
+    transforms.RandomResizedCrop(243, scale=(0.5, 1.0), ratio=(0.75, 1.33)),
     transforms.RandomHorizontalFlip(p=0.5),
     transforms.RandomApply([ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
     RandomizedGaussianBlur(p=0.3),
@@ -71,8 +71,8 @@ train_transform = transforms.Compose([
 ])
 
 val_transform = transforms.Compose([
-    transforms.Resize((266, 266)),
-    transforms.CenterCrop((256, 256)),
+    transforms.Resize((253, 253)),
+    transforms.CenterCrop((243, 243)),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
@@ -105,20 +105,20 @@ if __name__ == "__main__":
         print("⚙️ 전처리 중 (최초 실행 시 1회)...")
         raw_train_ds = load_dataset(
             "food101",
-            split="train",
-            # split="train[:100]"
+            # split="train",
+            split="train[:100]"
         )
         raw_val_ds = load_dataset(
             "food101",
-            split="validation",
-            # split="validation[:50]"
+            # split="validation",
+            split="validation[:50]"
         )
 
         train_ds = raw_train_ds.map(lambda x: apply_transform(x, mode="train"), num_proc=8)
         val_ds = raw_val_ds.map(lambda x: apply_transform(x, mode="val"), num_proc=8)
 
-        train_ds = train_ds.filter(lambda x: x is not None)
-        val_ds = val_ds.filter(lambda x: x is not None)
+        train_ds = train_ds.filter(lambda x: x is not None, num_proc=8)
+        val_ds = val_ds.filter(lambda x: x is not None, num_proc=8)
 
         train_ds.save_to_disk("C:/dataset/processed_food101/train")
         val_ds.save_to_disk("C:/dataset/processed_food101/val")
