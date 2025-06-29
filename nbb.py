@@ -3,11 +3,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-# todo : 1x1 conv 로 축소 처리
-def _single_conv_block(in_ch, out_ch, ks, strd, pdd):
+def _single_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd):
     return nn.Sequential(
         # 평면당 형태를 파악
-        nn.Conv2d(in_ch, out_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
+        nn.Conv2d(in_ch, mid_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
+        nn.BatchNorm2d(mid_ch),
+        nn.SiLU(),
+
+        # 채널간 패턴 분석
+        nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
         nn.BatchNorm2d(out_ch),
         nn.SiLU()
     )
@@ -22,7 +26,7 @@ class EssenceNet(nn.Module):
 
         # 동일 커널(같은 형태)로 다른 해상도의 멀티 스케일 분석
         # todo : out_ch 크기 변경
-        self.feats_conv = _single_conv_block(1, 64, 3, 3, 0)
+        self.feats_conv = _single_conv_block(1, 512, 128, 3, 3, 0)
 
         # todo : 보다 큰 커널로 멀티 해상도 탐지
 
