@@ -94,6 +94,8 @@ if __name__ == "__main__":
     # 확인 방법 : >> tensorboard --logdir=runs
     writer = SummaryWriter(log_dir="runs/exp1")
 
+    worker_count = 4
+
     # ----------------------------
     # 데이터셋 로드 또는 전처리
     # ----------------------------
@@ -114,11 +116,11 @@ if __name__ == "__main__":
             # split="validation[:50]"
         )
 
-        train_ds = raw_train_ds.map(lambda x: apply_transform(x, mode="train"), num_proc=8)
-        val_ds = raw_val_ds.map(lambda x: apply_transform(x, mode="val"), num_proc=8)
+        train_ds = raw_train_ds.map(lambda x: apply_transform(x, mode="train"), num_proc=worker_count)
+        val_ds = raw_val_ds.map(lambda x: apply_transform(x, mode="val"), num_proc=worker_count)
 
-        train_ds = train_ds.filter(lambda x: x is not None, num_proc=8)
-        val_ds = val_ds.filter(lambda x: x is not None, num_proc=8)
+        train_ds = train_ds.filter(lambda x: x is not None, num_proc=worker_count)
+        val_ds = val_ds.filter(lambda x: x is not None, num_proc=worker_count)
 
         train_ds.save_to_disk("C:/dataset/processed_food101/train")
         val_ds.save_to_disk("C:/dataset/processed_food101/val")
@@ -127,9 +129,11 @@ if __name__ == "__main__":
     train_ds.set_format(type='torch', columns=['pixel_values', 'label'])
     val_ds.set_format(type='torch', columns=['pixel_values', 'label'])
 
-    train_loader = DataLoader(train_ds, batch_size=16, shuffle=True, num_workers=8, pin_memory=True, prefetch_factor=4,
+    train_loader = DataLoader(train_ds, batch_size=16, shuffle=True, num_workers=worker_count, pin_memory=True,
+                              prefetch_factor=4,
                               persistent_workers=True)
-    val_loader = DataLoader(val_ds, batch_size=16, shuffle=False, num_workers=8, pin_memory=True, prefetch_factor=4,
+    val_loader = DataLoader(val_ds, batch_size=16, shuffle=False, num_workers=worker_count, pin_memory=True,
+                            prefetch_factor=4,
                             persistent_workers=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

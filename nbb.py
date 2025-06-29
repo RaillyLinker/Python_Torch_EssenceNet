@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+# todo : 1x1 conv 로 축소 처리
 def _single_conv_block(in_ch, out_ch, ks, strd, pdd):
     return nn.Sequential(
         # 평면당 형태를 파악
@@ -20,7 +21,8 @@ class EssenceNet(nn.Module):
         self.register_buffer("rgb2gray", torch.tensor([0.299, 0.587, 0.114]).view(1, 3, 1, 1))
 
         # 동일 커널(같은 형태)로 다른 해상도의 멀티 스케일 분석
-        self.feats_conv = _single_conv_block(1, 32, 3, 3, 0)
+        # todo : out_ch 크기 변경
+        self.feats_conv = _single_conv_block(1, 64, 3, 3, 0)
 
         # todo : 보다 큰 커널로 멀티 해상도 탐지
 
@@ -86,12 +88,16 @@ class EssenceNetClassifier(nn.Module):
             concat_feats = self.backbone(dummy_input)  # 이제는 하나의 tensor
             self.feat_dim = concat_feats.shape[1]  # (B, C_total, H, W)
 
+        # todo : 히든 벡터 사이즈 변경
+        # 분류기 히든 벡터 사이즈
+        classifier_hidden_vector_size = num_classes * 2
+
         # 픽셀별 벡터 → 클래스 logits (MLP처럼 1x1 Conv)
         self.head = nn.Sequential(
-            nn.Conv2d(self.feat_dim, num_classes * 2, kernel_size=1),
+            nn.Conv2d(self.feat_dim, classifier_hidden_vector_size, kernel_size=1),
             nn.ReLU(),
             nn.Dropout(p=0.5),  # Dropout 확률 조절 가능
-            nn.Conv2d(num_classes * 2, num_classes, kernel_size=1)
+            nn.Conv2d(classifier_hidden_vector_size, num_classes, kernel_size=1)
         )
 
     def forward(self, x):
