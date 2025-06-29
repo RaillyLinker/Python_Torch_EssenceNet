@@ -105,13 +105,13 @@ if __name__ == "__main__":
         print("⚙️ 전처리 중 (최초 실행 시 1회)...")
         raw_train_ds = load_dataset(
             "food101",
-            # split="train",
-            split="train[:100]"
+            split="train",
+            # split="train[:100]"
         )
         raw_val_ds = load_dataset(
             "food101",
-            # split="validation",
-            split="validation[:50]"
+            split="validation",
+            # split="validation[:50]"
         )
 
         train_ds = raw_train_ds.map(lambda x: apply_transform(x, mode="train"), num_proc=4)
