@@ -114,11 +114,11 @@ if __name__ == "__main__":
             split="validation[:50]"
         )
 
-        train_ds = raw_train_ds.map(lambda x: apply_transform(x, mode="train"), num_proc=8)
-        val_ds = raw_val_ds.map(lambda x: apply_transform(x, mode="val"), num_proc=8)
+        train_ds = raw_train_ds.map(lambda x: apply_transform(x, mode="train"), num_proc=4)
+        val_ds = raw_val_ds.map(lambda x: apply_transform(x, mode="val"), num_proc=4)
 
-        train_ds = train_ds.filter(lambda x: x is not None, num_proc=8)
-        val_ds = val_ds.filter(lambda x: x is not None, num_proc=8)
+        train_ds = train_ds.filter(lambda x: x is not None, num_proc=4)
+        val_ds = val_ds.filter(lambda x: x is not None, num_proc=4)
 
         train_ds.save_to_disk("C:/dataset/processed_food101/train")
         val_ds.save_to_disk("C:/dataset/processed_food101/val")
