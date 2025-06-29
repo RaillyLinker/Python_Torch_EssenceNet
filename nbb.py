@@ -96,6 +96,7 @@ class EssenceNetClassifier(nn.Module):
         # 분류기 히든 벡터 사이즈
         classifier_hidden_vector_size = num_classes * 2
 
+        # todo : 레이어 깊이 늘려보기
         # 픽셀별 벡터 → 클래스 logits (MLP처럼 1x1 Conv)
         self.head = nn.Sequential(
             nn.Conv2d(self.feat_dim, classifier_hidden_vector_size, kernel_size=1),
