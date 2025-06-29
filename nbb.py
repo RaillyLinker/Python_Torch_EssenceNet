@@ -4,14 +4,14 @@ import torch.nn.functional as F
 from dropblock import DropBlock2D
 
 
-def _single_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, drop_prob, block_size):
+def _single_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, dp, bs):
     return nn.Sequential(
         # 평면당 형태를 파악
         nn.Conv2d(in_ch, mid_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
         nn.BatchNorm2d(mid_ch),
         nn.SiLU(),
 
-        DropBlock2D(drop_prob=drop_prob, block_size=block_size),
+        DropBlock2D(drop_prob=dp, block_size=bs),
 
         # 채널간 패턴 분석
         nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
@@ -27,21 +27,27 @@ class EssenceNet(nn.Module):
 
         self.register_buffer("rgb2gray", torch.tensor([0.299, 0.587, 0.114]).view(1, 3, 1, 1))
 
+        # todo 채널 변경
         # 구역별 멀티 스케일 분석
-        # todo : ch 크기 변경
-        self.feats_conv1 = _single_conv_block(1, 256, 64, 3, 3, 0, 0.05, 5)  # 243x243 -> 81x81
-        self.feats_conv2 = _single_conv_block(1, 512, 128, 9, 9, 0, 0.1, 5)  # 243x243 -> 27x27
-        self.feats_conv3 = _single_conv_block(1, 1024, 256, 27, 27, 0, 0.15, 3)  # 243x243 -> 9x9
-        self.feats_conv4 = _single_conv_block(1, 2048, 512, 81, 81, 0, 0.2, 3)  # 243x243 -> 3x3
-        self.feats_conv5 = _single_conv_block(1, 4096, 1024, 243, 243, 0, 0.0, 1)  # 243x243 -> 1x1
+        # 2D 데이터의 형태적 특징을 멀티 스케일로 추출 하기 위해 1채널 오리진 정보를 N번 입력
+        # 전역적 정보를 지역적 정보로 투영하기 위해 커널이 큰 순서대로 배치(ex : 이 점은 책장 안의 책 안의 글자 안의 곡선 안에 속한 점이다.(즉, 지역은 전역에 속함))
+        self.feats_convs = nn.ModuleList([
+            _single_conv_block(1, 4096, 2048, 256, 256, 0, 0.0, 1),  # 256x256 -> 1x1
+            _single_conv_block(1, 2048, 1024, 128, 128, 0, 0.3, 2),  # 256x256 -> 2x2
+            _single_conv_block(1, 1024, 512, 64, 64, 0, 0.25, 3),  # 256x256 -> 4x4
+            _single_conv_block(1, 512, 256, 32, 32, 0, 0.2, 5),  # 256x256 -> 8x8
+            _single_conv_block(1, 256, 128, 16, 16, 0, 0.15, 5),  # 256x256 -> 16x16
+            _single_conv_block(1, 128, 64, 8, 8, 0, 0.1, 5),  # 256x256 -> 32x32
+            _single_conv_block(1, 64, 32, 4, 4, 0, 0.05, 5),  # 256x256 -> 64x64
+            _single_conv_block(1, 32, 16, 3, 2, 1, 0.05, 5),  # 256x256 -> 128x128
+        ])
 
     def forward(self, x):
         assert x.shape[1] == 3, "Input tensor must have 3 channels (RGB)."
 
         # 입력값 사이즈
         _, _, h, w = x.shape
-        # 입력 값 3 배수 사이즈로 제한 (ex : 3, 9, 27, 81, 243, 729, ...)
-        assert h == w and h % 3 == 0, "Input size must be square and divisible by 3"
+        assert h == w and h == 256, "Input must be 256x256"
 
         # 컬러 이미지
         # (B, 3, h, w)
@@ -51,54 +57,25 @@ class EssenceNet(nn.Module):
         # (B, 1, h, w)
         gray_feats = (color_feats * self.rgb2gray.to(x.device, x.dtype)).sum(dim=1, keepdim=True)
 
-        # 특징 저장 리스트(사이즈 별 특징 피라미트, 지역 -> 전역)
-        result_feats_list = []
+        concat_pyramid_feats = None
+        target_h = target_w = None
 
-        # 3x3 커널 특징 추출
-        k3_feats = self.feats_conv1(gray_feats)
-        _, _, gh, gw = k3_feats.shape
-        result_feats_list.append(
-            torch.cat([F.interpolate(color_feats, size=(gh, gw), mode='area'), k3_feats], dim=1)
-        )
+        for idx, conv in enumerate(self.feats_convs):
+            k_feats = conv(gray_feats)
+            _, _, gh, gw = k_feats.shape
 
-        # 9x9 커널 특징 추출
-        k9_feats = self.feats_conv2(gray_feats)
-        _, _, gh, gw = k9_feats.shape
-        result_feats_list.append(
-            torch.cat([F.interpolate(color_feats, size=(gh, gw), mode='area'), k9_feats], dim=1)
-        )
+            resized_color = F.interpolate(color_feats, size=(gh, gw), mode='area')
+            feat = torch.cat([resized_color, k_feats], dim=1)
 
-        # 27x27 커널 특징 추출
-        k27_feats = self.feats_conv3(gray_feats)
-        _, _, gh, gw = k27_feats.shape
-        result_feats_list.append(
-            torch.cat([F.interpolate(color_feats, size=(gh, gw), mode='area'), k27_feats], dim=1)
-        )
+            if idx == 0:
+                # 첫 번째 피처맵 해상도 저장
+                target_h, target_w = feat.shape[2:]
+                concat_pyramid_feats = feat  # 초기값
+            else:
+                feat = F.interpolate(feat, size=(target_h, target_w), mode='nearest')
+                concat_pyramid_feats = torch.cat([concat_pyramid_feats, feat], dim=1)
 
-        # 81x81 커널 특징 추출
-        k81_feats = self.feats_conv4(gray_feats)
-        _, _, gh, gw = k81_feats.shape
-        result_feats_list.append(
-            torch.cat([F.interpolate(color_feats, size=(gh, gw), mode='area'), k81_feats], dim=1)
-        )
-
-        # 243x243 커널 특징 추출
-        k243_feats = self.feats_conv5(gray_feats)
-        _, _, gh, gw = k243_feats.shape
-        result_feats_list.append(
-            torch.cat([F.interpolate(color_feats, size=(gh, gw), mode='area'), k243_feats], dim=1)
-        )
-
-        # 가장 큰 해상도 (첫 피쳐맵 기준)
-        target_h, target_w = result_feats_list[0].shape[2:]
-
-        # 모든 피쳐맵을 가장 큰 해상도로 업샘플링 후 concat
-        pyramid_concat = torch.cat([
-            F.interpolate(feat, size=(target_h, target_w), mode='nearest')
-            for feat in result_feats_list
-        ], dim=1)
-
-        return pyramid_concat
+        return concat_pyramid_feats
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -109,14 +86,13 @@ class EssenceNetClassifier(nn.Module):
 
         # 임시 입력으로 채널 수와 해상도 계산
         with torch.no_grad():
-            dummy_input = torch.randn(2, 3, 243, 243)
+            dummy_input = torch.randn(2, 3, 256, 256)
             concat_feats = self.backbone(dummy_input)  # 이제는 하나의 tensor
             self.feat_dim = concat_feats.shape[1]  # (B, C_total, H, W)
 
         # todo : 히든 벡터 사이즈 변경
         # 분류기 히든 벡터 사이즈
-        classifier_hidden_vector_size = num_classes * 4
-        classifier_hidden_vector_size1 = num_classes * 2
+        classifier_hidden_vector_size = num_classes * 2
 
         # todo : 레이어 깊이 변경
         # 픽셀별 벡터 → 클래스 logits (MLP처럼 1x1 Conv)
@@ -126,12 +102,7 @@ class EssenceNetClassifier(nn.Module):
             nn.SiLU(),
             nn.Dropout(p=0.5),  # Dropout 확률 조절 가능
 
-            nn.Conv2d(classifier_hidden_vector_size, classifier_hidden_vector_size1, kernel_size=1),
-            nn.BatchNorm2d(classifier_hidden_vector_size1),
-            nn.SiLU(),
-            nn.Dropout(p=0.5),  # Dropout 확률 조절 가능
-
-            nn.Conv2d(classifier_hidden_vector_size1, num_classes, kernel_size=1)
+            nn.Conv2d(classifier_hidden_vector_size, num_classes, kernel_size=1)
         )
 
     def forward(self, x):
@@ -142,6 +113,6 @@ class EssenceNetClassifier(nn.Module):
         down_feats = F.interpolate(concat_feats, size=(1, 1), mode='area')
 
         # 1x1 conv 로 픽셀별 logits
-        logits = self.head(down_feats)  # (B, num_classes, H/2, W/2)
+        logits = self.head(down_feats)  # (B, num_classes, 1, 1)
 
         return logits.view(logits.size(0), -1)  # (B, num_classes)
