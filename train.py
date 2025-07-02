@@ -71,8 +71,7 @@ train_transform = transforms.Compose([
 ])
 
 val_transform = transforms.Compose([
-    transforms.Resize((266, 266)),
-    transforms.CenterCrop((256, 256)),
+    transforms.RandomResizedCrop(256, scale=(0.5, 1.0), ratio=(0.75, 1.33)),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
@@ -94,7 +93,7 @@ if __name__ == "__main__":
     # 확인 방법 : >> tensorboard --logdir=runs
     writer = SummaryWriter(log_dir="runs/exp1")
 
-    worker_count = 4
+    worker_count = 2
 
     # ----------------------------
     # 데이터셋 로드 또는 전처리

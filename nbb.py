@@ -25,50 +25,25 @@ class EssenceNet(nn.Module):
     def __init__(self):
         super().__init__()
 
-        # 최종 특징맵 채널 개수
-        final_feat_ch = 2048
-
         self.register_buffer("rgb2gray", torch.tensor([0.299, 0.587, 0.114]).view(1, 3, 1, 1))
 
-        # todo 채널 변경
+        # todo 채널 변경(전체적으로 줄여보기. 특히 3 커널은 훨씬 작아져도 됨)
         # 구역별 멀티 스케일 분석
         # 2D 데이터의 형태적 특징을 멀티 스케일로 추출 하기 위해 1채널 오리진 정보를 N번 입력
         # 전역적 정보를 지역적 정보로 투영하기 위해 커널이 큰 순서대로 배치(ex : 이 점은 책장 안의 책 안의 글자 안의 곡선 안에 속한 점이다.(즉, 지역은 전역에 속함))
         self.feats_convs = nn.ModuleList([
-            _single_conv_block(1, 4096, 2048, 256, 256, 0, 0.0, 1),  # 256x256 -> 1x1
-            _single_conv_block(1, 2048, 1024, 128, 128, 0, 0.3, 2),  # 256x256 -> 2x2
-            _single_conv_block(1, 1024, 512, 64, 64, 0, 0.25, 3),  # 256x256 -> 4x4
-            _single_conv_block(1, 512, 256, 32, 32, 0, 0.2, 5),  # 256x256 -> 8x8
-            _single_conv_block(1, 256, 128, 16, 16, 0, 0.15, 5),  # 256x256 -> 16x16
-            _single_conv_block(1, 128, 64, 8, 8, 0, 0.1, 5),  # 256x256 -> 32x32
-            _single_conv_block(1, 64, 32, 4, 4, 0, 0.05, 5),  # 256x256 -> 64x64
-            _single_conv_block(1, 32, 16, 3, 2, 1, 0.05, 5),  # 256x256 -> 128x128
+            _single_conv_block(1, 2048, 1024, 256, 256, 0, 0.0, 1),  # 256x256 -> 1x1
+            # _single_conv_block(1, 1024, 512, 128, 128, 0, 0.3, 2),  # 256x256 -> 2x2
+            # _single_conv_block(1, 512, 256, 64, 64, 0, 0.25, 3),  # 256x256 -> 4x4
+            # _single_conv_block(1, 256, 128, 32, 32, 0, 0.2, 5),  # 256x256 -> 8x8
+            # _single_conv_block(1, 128, 64, 16, 16, 0, 0.15, 5),  # 256x256 -> 16x16
+            # _single_conv_block(1, 64, 32, 8, 8, 0, 0.1, 5),  # 256x256 -> 32x32
+            # _single_conv_block(1, 32, 16, 4, 4, 0, 0.05, 5),  # 256x256 -> 64x64
+            # _single_conv_block(1, 16, 8, 3, 2, 1, 0.05, 5),  # 256x256 -> 128x128
         ])
-
-        total_channels = 0
-        for conv in self.feats_convs:
-            # conv 출력 채널 추출
-            out_ch = None
-            for layer in reversed(list(conv.children())):
-                if isinstance(layer, nn.BatchNorm2d):
-                    out_ch = layer.num_features
-                    break
-            if out_ch is None:
-                raise ValueError("BatchNorm2d layer not found in conv block")
-            total_channels += (3 + out_ch)  # RGB 3 + conv 출력 채널 합산
-
-        self.channel_reduction = nn.Sequential(
-            nn.Conv2d(total_channels, final_feat_ch, kernel_size=1, stride=1, padding=0, bias=False),
-            nn.BatchNorm2d(final_feat_ch),
-            nn.SiLU()
-        )
 
     def forward(self, x):
         assert x.shape[1] == 3, "Input tensor must have 3 channels (RGB)."
-
-        # 입력값 사이즈
-        _, _, h, w = x.shape
-        assert h == w and h == 256, "Input must be 256x256"
 
         # 컬러 이미지
         # (B, 3, h, w)
@@ -93,9 +68,6 @@ class EssenceNet(nn.Module):
 
         concat_pyramid_feats = torch.cat(feats_resized, dim=1)
 
-        # 1x1 Conv로 채널 수 축소
-        concat_pyramid_feats = self.channel_reduction(concat_pyramid_feats)
-
         return concat_pyramid_feats
 
 
@@ -113,17 +85,35 @@ class EssenceNetClassifier(nn.Module):
 
         # todo : 히든 벡터 사이즈 변경
         # 분류기 히든 벡터 사이즈
-        classifier_hidden_vector_size = num_classes * 2
+        classifier_hidden_vector_size1 = self.feat_dim / 2
+        classifier_hidden_vector_size2 = classifier_hidden_vector_size1
+        classifier_hidden_vector_size3 = classifier_hidden_vector_size2 / 2
+        classifier_hidden_vector_size4 = classifier_hidden_vector_size3
 
         # todo : 레이어 깊이 변경
         # 픽셀별 벡터 → 클래스 logits (MLP처럼 1x1 Conv)
         self.head = nn.Sequential(
-            nn.Conv2d(self.feat_dim, classifier_hidden_vector_size, kernel_size=1),
-            nn.BatchNorm2d(classifier_hidden_vector_size),
+            nn.Conv2d(self.feat_dim, classifier_hidden_vector_size1, kernel_size=1),
+            nn.BatchNorm2d(classifier_hidden_vector_size1),
             nn.SiLU(),
             nn.Dropout(p=0.5),  # Dropout 확률 조절 가능
 
-            nn.Conv2d(classifier_hidden_vector_size, num_classes, kernel_size=1)
+            nn.Conv2d(classifier_hidden_vector_size1, classifier_hidden_vector_size2, kernel_size=1),
+            nn.BatchNorm2d(classifier_hidden_vector_size2),
+            nn.SiLU(),
+            nn.Dropout(p=0.5),  # Dropout 확률 조절 가능
+
+            nn.Conv2d(classifier_hidden_vector_size2, classifier_hidden_vector_size3, kernel_size=1),
+            nn.BatchNorm2d(classifier_hidden_vector_size3),
+            nn.SiLU(),
+            nn.Dropout(p=0.5),  # Dropout 확률 조절 가능
+
+            nn.Conv2d(classifier_hidden_vector_size3, classifier_hidden_vector_size4, kernel_size=1),
+            nn.BatchNorm2d(classifier_hidden_vector_size4),
+            nn.SiLU(),
+            nn.Dropout(p=0.5),  # Dropout 확률 조절 가능
+
+            nn.Conv2d(classifier_hidden_vector_size4, num_classes, kernel_size=1)
         )
 
     def forward(self, x):
