@@ -33,13 +33,13 @@ class EssenceNet(nn.Module):
         # 전역적 정보를 지역적 정보로 투영하기 위해 커널이 큰 순서대로 배치(ex : 이 점은 책장 안의 책 안의 글자 안의 곡선 안에 속한 점이다.(즉, 지역은 전역에 속함))
         self.feats_convs = nn.ModuleList([
             _single_conv_block(1, 2048, 1024, 256, 256, 0, 0.0, 1),  # 256x256 -> 1x1
-            # _single_conv_block(1, 1024, 512, 128, 128, 0, 0.3, 2),  # 256x256 -> 2x2
-            # _single_conv_block(1, 512, 256, 64, 64, 0, 0.25, 3),  # 256x256 -> 4x4
-            # _single_conv_block(1, 256, 128, 32, 32, 0, 0.2, 5),  # 256x256 -> 8x8
-            # _single_conv_block(1, 128, 64, 16, 16, 0, 0.15, 5),  # 256x256 -> 16x16
-            # _single_conv_block(1, 64, 32, 8, 8, 0, 0.1, 5),  # 256x256 -> 32x32
-            # _single_conv_block(1, 32, 16, 4, 4, 0, 0.05, 5),  # 256x256 -> 64x64
-            # _single_conv_block(1, 16, 8, 3, 2, 1, 0.05, 5),  # 256x256 -> 128x128
+            _single_conv_block(1, 1024, 512, 128, 128, 0, 0.3, 2),  # 256x256 -> 2x2
+            _single_conv_block(1, 512, 256, 64, 64, 0, 0.25, 3),  # 256x256 -> 4x4
+            _single_conv_block(1, 256, 128, 32, 32, 0, 0.2, 5),  # 256x256 -> 8x8
+            _single_conv_block(1, 128, 64, 16, 16, 0, 0.15, 5),  # 256x256 -> 16x16
+            _single_conv_block(1, 64, 32, 8, 8, 0, 0.1, 5),  # 256x256 -> 32x32
+            _single_conv_block(1, 32, 16, 4, 4, 0, 0.05, 5),  # 256x256 -> 64x64
+            _single_conv_block(1, 16, 8, 3, 2, 1, 0.05, 5),  # 256x256 -> 128x128
         ])
 
     def forward(self, x):

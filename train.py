@@ -93,7 +93,7 @@ if __name__ == "__main__":
     # 확인 방법 : >> tensorboard --logdir=runs
     writer = SummaryWriter(log_dir="runs/exp1")
 
-    worker_count = 2
+    worker_count = 4
 
     # ----------------------------
     # 데이터셋 로드 또는 전처리
