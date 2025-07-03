@@ -67,27 +67,33 @@ class EssenceNet(nn.Module):
 # ----------------------------------------------------------------------------------------------------------------------
 # (EssenceNet 이미지 분류기)
 class EssenceNetClassifier(nn.Module):
-    def __init__(self, num_classes: int, threshold: float = 0.8):
+    def __init__(self, num_classes: int):
         super().__init__()
+        # 특징맵 추출 백본 모델
         self.backbone = EssenceNet()
-        self.num_classes = num_classes
-        self.threshold = threshold
 
-        # feature 채널 계산
+        # 결과 분류 임계값(이 값이 넘어가면 정답으로 확정)
+        self.threshold = 0.8
+
+        # 백본 feature 피라미드 채널 계산
         feat_out_ch = [conv[0].out_channels for conv in self.backbone.feats_convs]
         f_ch = [c + 3 for c in feat_out_ch]
 
+        # todo : xor 해결 가능하게 깊게 구성해보기
         # 스테이지별 분류 헤드
         self.heads = nn.ModuleList([
             nn.Conv2d(f_ch[i] + f_ch[i + 1], num_classes, kernel_size=1)
             for i in range(len(f_ch) - 1)
         ])
+
         # concat 후 프로젝션(conv) to next stage 채널 수
         self.proj_convs = nn.ModuleList([
             nn.Conv2d(f_ch[i] + f_ch[i + 1], f_ch[i + 1], kernel_size=1)
             for i in range(len(f_ch) - 1)
         ])
 
+    # todo : 컨샙은 결정됨. 드롭아웃 방식과 근본 방식 고민해보기.
+    #   다음 판단시 압축해서 concat 하기 방식 사용해보기
     def _forward_single(self, x: torch.Tensor) -> torch.Tensor:
         # x: (1, 3, 256, 256)
         feats = self.backbone(x)
