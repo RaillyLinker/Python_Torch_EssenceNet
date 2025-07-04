@@ -10,7 +10,7 @@ def _single_conv_block(in_ch, out_ch, ks, strd, gn, pdd, dp, bs):
     return nn.Sequential(
         # 평면당 형태를 파악
         nn.Conv2d(in_ch, out_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
-        nn.GroupNorm(num_groups=gn, num_channels=out_ch),
+        nn.BatchNorm2d(out_ch),
         nn.SiLU(),
         DropBlock2D(drop_prob=dp, block_size=bs)
     )
@@ -72,69 +72,82 @@ class EssenceNetClassifier(nn.Module):
         # 특징맵 추출 백본 모델
         self.backbone = EssenceNet()
 
-        # 결과 분류 임계값(이 값이 넘어가면 정답으로 확정)
-        self.threshold = 0.8
-
         # 백본 feature 피라미드 채널 계산
         feat_out_ch = [conv[0].out_channels for conv in self.backbone.feats_convs]
+        # ex : f_ch = [1024+3, 512+3, 256+3, 128+3, 64+3, 32+3, 16+3, 8+3] = [1027, 515, 259, 131, 67, 35, 19, 11]
         f_ch = [c + 3 for c in feat_out_ch]
 
-        # todo : xor 해결 가능하게 깊게 구성해보기
-        # 스테이지별 분류 헤드
-        self.heads = nn.ModuleList([
-            nn.Conv2d(f_ch[i] + f_ch[i + 1], num_classes, kernel_size=1)
-            for i in range(len(f_ch) - 1)
-        ])
+        self.total_feat_ch = sum(f_ch)  # concat 후 총 채널 수
 
-        # concat 후 프로젝션(conv) to next stage 채널 수
-        self.proj_convs = nn.ModuleList([
-            nn.Conv2d(f_ch[i] + f_ch[i + 1], f_ch[i + 1], kernel_size=1)
-            for i in range(len(f_ch) - 1)
-        ])
+        hidden = int(self.total_feat_ch / 2)
 
-    # todo : 컨샙은 결정됨. 드롭아웃 방식과 근본 방식 고민해보기.
-    #   다음 판단시 압축해서 concat 하기 방식 사용해보기
-    def _forward_single(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (1, 3, 256, 256)
-        feats = self.backbone(x)
-        prev_feat = feats[0]
+        # todo : 히든 변경 및 깊이 변경
+        # MLP: (concat된 채널 수) → num_classes
+        self.mlp = nn.Sequential(
+            nn.Linear(self.total_feat_ch, hidden),
+            nn.LayerNorm(hidden),
+            nn.SiLU(),
+            nn.Dropout(0.3),
+            nn.Linear(hidden, num_classes)
+        )
 
-        for i, (head, proj) in enumerate(zip(self.heads, self.proj_convs), start=1):
-            curr = feats[i]
-            up = F.interpolate(prev_feat, size=curr.shape[2:], mode='nearest')
-            concat = torch.cat([up, curr], dim=1)
+    def forward(self, x):
+        # 백본 피쳐맵 피라미드 추출
+        feats_list = self.backbone(x)
 
-            logits = head(concat)  # (1, C, H, W)
-            probs = F.softmax(logits, dim=1)
-            max_vals, _ = probs.max(dim=1)  # (1, H, W)
+        # 가장 큰 해상도: 128x128 (마지막 출력의 spatial size)
+        target_size = feats_list[-1].shape[2:]
 
-            mask = max_vals > self.threshold
-            if mask.view(-1).any():
-                flat_vals = max_vals.view(-1).clone()
-                flat_vals[flat_vals <= self.threshold] = -1
-                idx = flat_vals.argmax().item()
-                H, W = max_vals.shape[1], max_vals.shape[2]
-                h, w = divmod(idx, W)
-                return probs[0, :, h, w]  # (num_classes,)
+        # 모든 피처를 같은 해상도로 업샘플링 후 채널 방향으로 concat: (B, C_total, 128, 128)
+        upsampled_feats = torch.cat(
+            [F.interpolate(f, size=target_size, mode='nearest') for f in feats_list], dim=1
+        )
 
-            prev_feat = proj(concat)
+        # (B, C, H, W) → (B, H*W, C)
+        B, C, H, W = upsampled_feats.shape
+        fused_feats = upsampled_feats.permute(0, 2, 3, 1).reshape(B, H * W, C)
 
-        # 마지막 스테이지 결과
-        flat = max_vals.view(-1)
-        idx = flat.argmax().item()
-        H, W = max_vals.shape[1], max_vals.shape[2]
-        h, w = divmod(idx, W)
-        return probs[0, :, h, w]  # (num_classes,)
+        # MLP 적용 → (B, H*W, num_classes)
+        logits = self.mlp(fused_feats)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B = x.size(0)
-        # 배치 크기에 상관없이 동작
-        outputs = []
-        for i in range(B):
-            single_out = self._forward_single(x[i:i + 1])
-            outputs.append(single_out)
-        return torch.stack(outputs, dim=0)  # (B, num_classes)
+        # 1) 픽셀별 가장 높은 클래스 인덱스
+        pred_classes = logits.argmax(dim=-1)  # (B, H*W)
 
+        final_logits = []
+
+        for b in range(B):
+            preds = pred_classes[b]  # (H*W,)
+            logit_vectors = logits[b]  # (H*W, num_classes)
+
+            # 2) 모드 클래스(가장 많이 나온 클래스)
+            values, counts = preds.unique(return_counts=True)
+            mode_class = values[counts.argmax()]
+
+            # 3) 모드 클래스에 속하는 픽셀 인덱스
+            mode_mask = (preds == mode_class)
+
+            # 4) 해당 픽셀들의 로짓 벡터들
+            mode_logits = logit_vectors[mode_mask]  # (N_mode, num_classes)
+
+            # 5) 각 픽셀 로짓 벡터의 '크기' 계산 (예: L2 norm or sum of logits)
+            # 여기서는 L2 norm 사용
+            logits_norm = mode_logits.norm(dim=1)  # (N_mode,)
+
+            # 6) 중간값(median) 인덱스 찾기
+            median_value = logits_norm.median()
+            median_idx = (logits_norm - median_value).abs().argmin()
+
+            # 7) 중간값에 가장 가까운 로짓 벡터 선택
+            selected_logit = mode_logits[median_idx]  # (num_classes,)
+
+            final_logits.append(selected_logit)
+
+        # (B, num_classes) 텐서로 변환
+        final_logits = torch.stack(final_logits)
+
+        return final_logits
+
+# 추론시 동작 :
 # 위 백본에서 추출된 피쳐맵 피라미드에서 1x1 특징맵부터 128x128 특징맵을 f1, f2, f3, f4, f5, f6, f7, f8 이라고 하겠습니다.
 # 이를 가지고 EssenceNetClassifier 를 구현합니다.
 #
