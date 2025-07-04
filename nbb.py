@@ -6,7 +6,7 @@ from dropblock import DropBlock2D
 
 # (2D 특징 추출 블록)
 # 말 그대로 2차원 특징 추출만 수행
-def _single_conv_block(in_ch, out_ch, ks, strd, gn, pdd, dp, bs):
+def _single_conv_block(in_ch, out_ch, ks, strd, pdd, dp, bs):
     return nn.Sequential(
         # 평면당 형태를 파악
         nn.Conv2d(in_ch, out_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
@@ -29,14 +29,14 @@ class EssenceNet(nn.Module):
         # 2D 데이터의 형태적 특징을 멀티 스케일로 추출 하기 위해 1채널 오리진 정보를 N번 입력
         # 전역적 정보를 지역적 정보로 투영하기 위해 커널이 큰 순서대로 배치(ex : 이 점은 책장 안의 책 안의 글자 안의 곡선 안에 속한 점이다.(즉, 지역은 전역에 속함))
         self.feats_convs = nn.ModuleList([
-            _single_conv_block(1, 1024, 256, 256, 32, 0, 0.0, 1),  # 256x256 -> 1x1
-            _single_conv_block(1, 512, 128, 128, 32, 0, 0.3, 2),  # 256x256 -> 2x2
-            _single_conv_block(1, 256, 64, 64, 16, 0, 0.25, 3),  # 256x256 -> 4x4
-            _single_conv_block(1, 128, 32, 32, 8, 0, 0.2, 5),  # 256x256 -> 8x8
-            _single_conv_block(1, 64, 16, 16, 4, 0, 0.15, 5),  # 256x256 -> 16x16
-            _single_conv_block(1, 32, 8, 8, 4, 0, 0.1, 5),  # 256x256 -> 32x32
-            _single_conv_block(1, 16, 4, 4, 4, 0, 0.05, 5),  # 256x256 -> 64x64
-            _single_conv_block(1, 8, 3, 2, 4, 1, 0.05, 5),  # 256x256 -> 128x128
+            _single_conv_block(1, 1024, 256, 256, 0, 0.0, 1),  # 256x256 -> 1x1
+            _single_conv_block(1, 512, 128, 128, 0, 0.3, 2),  # 256x256 -> 2x2
+            _single_conv_block(1, 256, 64, 64, 0, 0.25, 3),  # 256x256 -> 4x4
+            _single_conv_block(1, 128, 32, 32, 0, 0.2, 5),  # 256x256 -> 8x8
+            _single_conv_block(1, 64, 16, 16, 0, 0.15, 5),  # 256x256 -> 16x16
+            _single_conv_block(1, 32, 8, 8, 0, 0.1, 5),  # 256x256 -> 32x32
+            _single_conv_block(1, 16, 4, 4, 0, 0.05, 5),  # 256x256 -> 64x64
+            _single_conv_block(1, 8, 3, 2, 1, 0.05, 5),  # 256x256 -> 128x128
         ])
 
     def forward(self, x):
