@@ -69,83 +69,93 @@ class EssenceNet(nn.Module):
 class EssenceNetClassifier(nn.Module):
     def __init__(self, num_classes: int):
         super().__init__()
-        # 특징맵 추출 백본 모델
+        # 위치 특징 추출 백본 모델
         self.backbone = EssenceNet()
 
-        # 백본 feature 피라미드 채널 계산
-        feat_out_ch = [conv[0].out_channels for conv in self.backbone.feats_convs]
-        # ex : f_ch = [1024+3, 512+3, 256+3, 128+3, 64+3, 32+3, 16+3, 8+3] = [1027, 515, 259, 131, 67, 35, 19, 11]
-        f_ch = [c + 3 for c in feat_out_ch]
+        # 백본 추출 특징맵 피라미드 채널 개수
+        feat_channels = [1027, 515, 259, 131, 67, 35, 19, 11]
 
-        self.total_feat_ch = sum(f_ch)  # concat 후 총 채널 수
-
-        hidden = int(self.total_feat_ch / 2)
-
-        # todo : 히든 변경 및 깊이 변경
-        # MLP: (concat된 채널 수) → num_classes
-        self.mlp = nn.Sequential(
-            nn.Linear(self.total_feat_ch, hidden),
-            nn.LayerNorm(hidden),
-            nn.SiLU(),
-            nn.Dropout(0.3),
-            nn.Linear(hidden, num_classes)
-        )
+        # 특징맵 피라미드 레이어별 헤드
+        # todo : hidden 변경 및 레이어 깊이 변경
+        accum_channels = 0
+        self.heads = nn.ModuleList()
+        for ch in feat_channels:
+            accum_channels += ch
+            hidden = accum_channels // 2
+            hidden2 = hidden // 2
+            mlp = nn.Sequential(
+                nn.Conv2d(accum_channels, hidden, kernel_size=1, bias=False),
+                nn.BatchNorm2d(hidden),
+                nn.SiLU(),
+                nn.Dropout2d(0.3),
+                nn.Conv2d(hidden, hidden2, kernel_size=1, bias=False),
+                nn.BatchNorm2d(hidden2),
+                nn.SiLU(),
+                nn.Dropout2d(0.3),
+                nn.Conv2d(hidden2, num_classes, kernel_size=1)
+            )
+            self.heads.append(mlp)
 
     def forward(self, x):
-        # 백본 피쳐맵 피라미드 추출
-        feats_list = self.backbone(x)
+        # 이미지 특징맵 피라미드 추출
+        feats = self.backbone(x)
 
-        # 가장 큰 해상도: 128x128 (마지막 출력의 spatial size)
-        target_size = feats_list[-1].shape[2:]
+        # 첫번째 특징맵 분석
+        accum_feat = feats[0]  # (B, 1027, 1, 1)
+        logits = self.heads[0](accum_feat)  # (B, num_classes, 1, 1)
 
-        # 모든 피처를 같은 해상도로 업샘플링 후 채널 방향으로 concat: (B, C_total, 128, 128)
-        upsampled_feats = torch.cat(
-            [F.interpolate(f, size=target_size, mode='nearest') for f in feats_list], dim=1
-        )
+        # 특징맵 누적 리스트
+        accum_chained_feats = [accum_feat]  # 누적용
 
-        # (B, C, H, W) → (B, H*W, C)
-        B, C, H, W = upsampled_feats.shape
-        fused_feats = upsampled_feats.permute(0, 2, 3, 1).reshape(B, H * W, C)
+        for i in range(1, len(feats)):
+            feat_i = feats[i]  # (B, C_i, H, W)
+            B, _, H, W = feat_i.shape
 
-        # MLP 적용 → (B, H*W, num_classes)
-        logits = self.mlp(fused_feats)
+            # 이전까지의 모든 특징 업샘플링 후 concat
+            all_prev_feat = torch.cat(
+                [F.interpolate(f, size=(H, W), mode='nearest') for f in accum_chained_feats] + [feat_i], dim=1
+            )
 
-        # 1) 픽셀별 가장 높은 클래스 인덱스
-        pred_classes = logits.argmax(dim=-1)  # (B, H*W)
+            # 이번 로짓 벡터 추출
+            logits_i = self.heads[i](all_prev_feat)
 
-        final_logits = []
+            # 이전 logits 업샘플링
+            prev_logits = F.interpolate(logits, size=(H, W), mode='nearest')
 
+            # 정규화: (mean, std) 기준
+            mean1, std1 = prev_logits.mean(dim=(1, 2, 3), keepdim=True), prev_logits.std(dim=(1, 2, 3), keepdim=True)
+            mean2, std2 = logits_i.mean(dim=(1, 2, 3), keepdim=True), logits_i.std(dim=(1, 2, 3), keepdim=True)
+
+            prev_logits_norm = (prev_logits - mean1) / (std1 + 1e-5)
+            logits_i_norm = (logits_i - mean2) / (std2 + 1e-5)
+
+            # 정규화된 두 로짓을 합산
+            logits = prev_logits_norm + logits_i_norm
+
+            accum_chained_feats.append(feat_i)
+
+        # 최종 logits: (B, num_classes, 128, 128)
+        B, C, H, W = logits.shape
+        flat_logits = logits.view(B, C, -1).permute(0, 2, 1)  # (B, H*W, num_classes)
+
+        final_outputs = []
         for b in range(B):
-            preds = pred_classes[b]  # (H*W,)
-            logit_vectors = logits[b]  # (H*W, num_classes)
+            logits_b = flat_logits[b]  # (H*W, num_classes)
+            max_val, _ = logits_b.max(dim=1)
+            max_pos = max_val.argmax()
+            class_id = logits_b[max_pos].argmax()
 
-            # 2) 모드 클래스(가장 많이 나온 클래스)
-            values, counts = preds.unique(return_counts=True)
-            mode_class = values[counts.argmax()]
+            class_mask = logits_b.argmax(dim=1) == class_id
+            selected_logits = logits_b[class_mask]  # (M, num_classes)
 
-            # 3) 모드 클래스에 속하는 픽셀 인덱스
-            mode_mask = (preds == mode_class)
+            class_scores = selected_logits[:, class_id]
+            median_score = class_scores.median()
+            diff = (class_scores - median_score).abs()
+            idx = diff.argmin()
 
-            # 4) 해당 픽셀들의 로짓 벡터들
-            mode_logits = logit_vectors[mode_mask]  # (N_mode, num_classes)
+            final_outputs.append(selected_logits[idx])  # (num_classes,)
 
-            # 5) 각 픽셀 로짓 벡터의 '크기' 계산 (예: L2 norm or sum of logits)
-            # 여기서는 L2 norm 사용
-            logits_norm = mode_logits.norm(dim=1)  # (N_mode,)
-
-            # 6) 중간값(median) 인덱스 찾기
-            median_value = logits_norm.median()
-            median_idx = (logits_norm - median_value).abs().argmin()
-
-            # 7) 중간값에 가장 가까운 로짓 벡터 선택
-            selected_logit = mode_logits[median_idx]  # (num_classes,)
-
-            final_logits.append(selected_logit)
-
-        # (B, num_classes) 텐서로 변환
-        final_logits = torch.stack(final_logits)
-
-        return final_logits
+        return torch.stack(final_outputs, dim=0)  # (B, num_classes)
 
 # 추론시 동작 :
 # 위 백본에서 추출된 피쳐맵 피라미드에서 1x1 특징맵부터 128x128 특징맵을 f1, f2, f3, f4, f5, f6, f7, f8 이라고 하겠습니다.
