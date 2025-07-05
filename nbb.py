@@ -6,13 +6,19 @@ from dropblock import DropBlock2D
 
 # (2D 특징 추출 블록)
 # 말 그대로 2차원 특징 추출만 수행
-def _single_conv_block(in_ch, out_ch, ks, strd, pdd, dp, bs):
+def _single_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, dp, bs):
     return nn.Sequential(
         # 평면당 형태를 파악
-        nn.Conv2d(in_ch, out_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
-        nn.BatchNorm2d(out_ch),
+        nn.Conv2d(in_ch, mid_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
+        nn.BatchNorm2d(mid_ch),
         nn.SiLU(),
-        DropBlock2D(drop_prob=dp, block_size=bs)
+
+        DropBlock2D(drop_prob=dp, block_size=bs),
+
+        # 픽셀별 의미 추출
+        nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
+        nn.BatchNorm2d(out_ch),
+        nn.SiLU()
     )
 
 
@@ -30,14 +36,14 @@ class EssenceNet(nn.Module):
         # 전역적 정보를 지역적 정보로 투영하기 위해 커널이 큰 순서대로 배치
         # 작은 선만으로는 아무 정보가 없음. 큰 형태에서 작은 디테일로 정보가 보정 되는 것이 자연스러움
         self.feats_convs = nn.ModuleList([
-            _single_conv_block(1, 1024, 256, 256, 0, 0.0, 1),  # 256x256 -> 1x1
-            _single_conv_block(1, 512, 128, 128, 0, 0.3, 2),  # 256x256 -> 2x2
-            _single_conv_block(1, 256, 64, 64, 0, 0.25, 3),  # 256x256 -> 4x4
-            _single_conv_block(1, 128, 32, 32, 0, 0.2, 5),  # 256x256 -> 8x8
-            _single_conv_block(1, 64, 16, 16, 0, 0.15, 5),  # 256x256 -> 16x16
-            _single_conv_block(1, 32, 8, 8, 0, 0.1, 5),  # 256x256 -> 32x32
-            _single_conv_block(1, 16, 4, 4, 0, 0.05, 5),  # 256x256 -> 64x64
-            _single_conv_block(1, 8, 3, 2, 1, 0.05, 5),  # 256x256 -> 128x128
+            _single_conv_block(1, 2048, 1024, 256, 256, 0, 0.0, 1),  # 256x256 -> 1x1
+            _single_conv_block(1, 1024, 512, 128, 128, 0, 0.3, 2),  # 256x256 -> 2x2
+            _single_conv_block(1, 512, 256, 64, 64, 0, 0.25, 3),  # 256x256 -> 4x4
+            _single_conv_block(1, 256, 128, 32, 32, 0, 0.2, 5),  # 256x256 -> 8x8
+            _single_conv_block(1, 128, 64, 16, 16, 0, 0.15, 5),  # 256x256 -> 16x16
+            _single_conv_block(1, 64, 32, 8, 8, 0, 0.1, 5),  # 256x256 -> 32x32
+            _single_conv_block(1, 32, 16, 4, 4, 0, 0.05, 5),  # 256x256 -> 64x64
+            _single_conv_block(1, 16, 8, 3, 2, 1, 0.05, 5),  # 256x256 -> 128x128
         ])
 
     def forward(self, x):
@@ -67,6 +73,7 @@ class EssenceNet(nn.Module):
 
 # ----------------------------------------------------------------------------------------------------------------------
 # (EssenceNet 이미지 분류기)
+# todo : vision_context 를 사용하는 방식 수정해보기 : 지금처럼 concat 하지 말고 residual 처럼 더하고 norm 하는 방식
 class EssenceNetClassifier(nn.Module):
     def __init__(self, num_classes: int):
         super().__init__()
@@ -78,7 +85,7 @@ class EssenceNetClassifier(nn.Module):
 
         # todo : 벡터 사이즈 변경
         # 시각 정보 벡터의 사이즈
-        vision_context_size = 1027
+        vision_context_size = 1024
 
         # todo : 레이어 깊이 변경
         # 시각 정보 인코더 리스트
@@ -115,8 +122,7 @@ class EssenceNetClassifier(nn.Module):
         feats = self.backbone(x)
 
         # 첫번째 특징맵 분석
-        first_feat = feats[0]
-        vision_vector = self.vision_context_encoders[0](first_feat)
+        vision_vector = self.vision_context_encoders[0](feats[0])
         logits = self.classifier_head(vision_vector)
 
         for i in range(1, len(feats)):
