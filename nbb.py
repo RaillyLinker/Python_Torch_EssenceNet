@@ -81,16 +81,17 @@ class EssenceNetClassifier(nn.Module):
         vision_context_size = 1027
 
         # todo : 레이어 깊이 변경
-        # todo : 다음 레이어 분석시 이전의 비전 컨텍스트 벡터 사용 여부 파악
         # 시각 정보 인코더 리스트
-        accum_channels = 0
         self.vision_context_encoders = nn.ModuleList()
-        for ch in feat_channels:
-            accum_channels += ch
-            hidden = accum_channels // 2
+        for idx, ch in enumerate(feat_channels):
+            if idx == 0:
+                input_ch = ch
+            else:
+                input_ch = ch + vision_context_size
+            hidden = input_ch // 2
             self.vision_context_encoders.append(
                 nn.Sequential(
-                    nn.Conv2d(accum_channels, hidden, kernel_size=1, bias=False),
+                    nn.Conv2d(input_ch, hidden, kernel_size=1, bias=False),
                     nn.BatchNorm2d(hidden),
                     nn.SiLU(),
                     nn.Dropout2d(0.2),
@@ -118,20 +119,21 @@ class EssenceNetClassifier(nn.Module):
         vision_vector = self.vision_context_encoders[0](first_feat)
         logits = self.classifier_head(vision_vector)
 
-        # 특징맵 누적 리스트
-        accum_chained_feats = [first_feat]
-
         for i in range(1, len(feats)):
-            feat_i = feats[i]  # (B, C_i, H, W)
-            B, _, H, W = feat_i.shape
+            feat_i = feats[i]
+            B, C, H, W = feat_i.shape
 
-            # 이전까지의 모든 특징 업샘플링 후 concat
-            all_prev_feat = torch.cat(
-                [F.interpolate(f, size=(H, W), mode='nearest') for f in accum_chained_feats] + [feat_i], dim=1
-            )
+            # vision_vector 크기 맞추기
+            if vision_vector.shape[2:] != (H, W):
+                vision_vector = F.interpolate(vision_vector, size=(H, W), mode='nearest')
+
+            # 현재 특징맵과 이전 vision vector concat
+            concat_input = torch.cat([feat_i, vision_vector], dim=1)
+
+            # vision context encoding
+            vision_vector = self.vision_context_encoders[i](concat_input)
 
             # 이번 로짓 벡터 추출
-            vision_vector = self.vision_context_encoders[i](all_prev_feat)
             logits_i = self.classifier_head(vision_vector)
 
             # 이전 logits 업샘플링
@@ -146,8 +148,6 @@ class EssenceNetClassifier(nn.Module):
 
             # 정규화된 두 로짓을 합산
             logits = prev_logits_norm + logits_i_norm
-
-            accum_chained_feats.append(feat_i)
 
         # 최종 logits: (B, num_classes, 128, 128)
         B, C, H, W = logits.shape
