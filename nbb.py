@@ -27,7 +27,8 @@ class EssenceNet(nn.Module):
         # todo 채널 변경
         # 구역별 멀티 스케일 분석
         # 2D 데이터의 형태적 특징을 멀티 스케일로 추출 하기 위해 1채널 오리진 정보를 N번 입력
-        # 전역적 정보를 지역적 정보로 투영하기 위해 커널이 큰 순서대로 배치(ex : 이 점은 책장 안의 책 안의 글자 안의 곡선 안에 속한 점이다.(즉, 지역은 전역에 속함))
+        # 전역적 정보를 지역적 정보로 투영하기 위해 커널이 큰 순서대로 배치
+        # 작은 선만으로는 아무 정보가 없음. 큰 형태에서 작은 디테일로 정보가 보정 되는 것이 자연스러움
         self.feats_convs = nn.ModuleList([
             _single_conv_block(1, 1024, 256, 256, 0, 0.0, 1),  # 256x256 -> 1x1
             _single_conv_block(1, 512, 128, 128, 0, 0.3, 2),  # 256x256 -> 2x2
@@ -75,37 +76,50 @@ class EssenceNetClassifier(nn.Module):
         # 백본 추출 특징맵 피라미드 채널 개수
         feat_channels = [1027, 515, 259, 131, 67, 35, 19, 11]
 
-        # 특징맵 피라미드 레이어별 헤드
-        # todo : hidden 변경 및 레이어 깊이 변경
+        # todo : 벡터 사이즈 변경
+        # 시각 정보 벡터의 사이즈
+        vision_context_size = 1027
+
+        # todo : 레이어 깊이 변경
+        # todo : 다음 레이어 분석시 이전의 비전 컨텍스트 벡터 사용 여부 파악
+        # 시각 정보 인코더 리스트
         accum_channels = 0
-        self.heads = nn.ModuleList()
+        self.vision_context_encoders = nn.ModuleList()
         for ch in feat_channels:
             accum_channels += ch
             hidden = accum_channels // 2
-            hidden2 = hidden // 2
-            mlp = nn.Sequential(
-                nn.Conv2d(accum_channels, hidden, kernel_size=1, bias=False),
-                nn.BatchNorm2d(hidden),
-                nn.SiLU(),
-                nn.Dropout2d(0.3),
-                nn.Conv2d(hidden, hidden2, kernel_size=1, bias=False),
-                nn.BatchNorm2d(hidden2),
-                nn.SiLU(),
-                nn.Dropout2d(0.3),
-                nn.Conv2d(hidden2, num_classes, kernel_size=1)
+            self.vision_context_encoders.append(
+                nn.Sequential(
+                    nn.Conv2d(accum_channels, hidden, kernel_size=1, bias=False),
+                    nn.BatchNorm2d(hidden),
+                    nn.SiLU(),
+                    nn.Dropout2d(0.2),
+                    nn.Conv2d(hidden, vision_context_size, kernel_size=1)
+                )
             )
-            self.heads.append(mlp)
+
+        # todo : 레이어 깊이 변경
+        # 이미지 분류기 헤더
+        classifier_head_hidden = vision_context_size // 2
+        self.classifier_head = nn.Sequential(
+            nn.Conv2d(vision_context_size, classifier_head_hidden, kernel_size=1, bias=False),
+            nn.BatchNorm2d(classifier_head_hidden),
+            nn.SiLU(),
+            nn.Dropout2d(0.2),
+            nn.Conv2d(classifier_head_hidden, num_classes, kernel_size=1)
+        )
 
     def forward(self, x):
         # 이미지 특징맵 피라미드 추출
         feats = self.backbone(x)
 
         # 첫번째 특징맵 분석
-        accum_feat = feats[0]  # (B, 1027, 1, 1)
-        logits = self.heads[0](accum_feat)  # (B, num_classes, 1, 1)
+        first_feat = feats[0]
+        vision_vector = self.vision_context_encoders[0](first_feat)
+        logits = self.classifier_head(vision_vector)
 
         # 특징맵 누적 리스트
-        accum_chained_feats = [accum_feat]  # 누적용
+        accum_chained_feats = [first_feat]
 
         for i in range(1, len(feats)):
             feat_i = feats[i]  # (B, C_i, H, W)
@@ -117,7 +131,8 @@ class EssenceNetClassifier(nn.Module):
             )
 
             # 이번 로짓 벡터 추출
-            logits_i = self.heads[i](all_prev_feat)
+            vision_vector = self.vision_context_encoders[i](all_prev_feat)
+            logits_i = self.classifier_head(vision_vector)
 
             # 이전 logits 업샘플링
             prev_logits = F.interpolate(logits, size=(H, W), mode='nearest')

@@ -71,7 +71,8 @@ train_transform = transforms.Compose([
 ])
 
 val_transform = transforms.Compose([
-    transforms.RandomResizedCrop(256, scale=(0.5, 1.0), ratio=(0.75, 1.33)),
+    transforms.Resize(288),
+    transforms.CenterCrop(256),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
