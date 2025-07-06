@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from dropblock import DropBlock2D
 
 
-# todo : 1x1 conv 깊이 더 추가 = 표현력 상승
+# todo : 1x1 conv 깊이 변경
 # (2D 특징 추출 블록)
 # 말 그대로 2차원 특징 추출만 수행
 def _single_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, dp, bs):
@@ -31,7 +31,7 @@ class EssenceNet(nn.Module):
         # 흑백 변환 가중치 저장
         self.register_buffer("rgb2gray", torch.tensor([0.299, 0.587, 0.114]).view(1, 3, 1, 1))
 
-        # todo conv 채널 추가 = conv3 위치 정보 판별 척도 상승, conv1 표현력 상승
+        # todo conv 채널 변경
         # 구역별 멀티 스케일 분석
         # 2D 데이터의 형태적 특징을 멀티 스케일로 추출 하기 위해 1채널 오리진 정보를 N번 입력
         # 전역적 정보를 지역적 정보로 투영하기 위해 커널이 큰 순서대로 배치
@@ -86,29 +86,37 @@ class EssenceNetClassifier(nn.Module):
         self.total_levels = len(feat_channels)
         self.identify_idx = self.total_levels - 1
 
-        # todo : 벡터 사이즈 변경 = 시각 정보 표현력 상승
+        # todo : 벡터 사이즈 변경
         # 시각 정보 벡터의 사이즈
-        vision_context_size = 1024
+        vision_context_size = 2048
 
-        # todo : 레이어 깊이 변경 = 시각 정보 인코딩 표현력 상승
+        # todo : 레이어 깊이 변경
         # 이미지 인코더
-        hidden = vision_context_size * 2
+        encoder_input = sum(feat_channels[:self.identify_idx + 1])
+        hidden = encoder_input // 2
         self.vision_context_encoder = nn.Sequential(
-            nn.Conv2d(sum(feat_channels[:self.identify_idx + 1]), hidden, kernel_size=1, bias=False),
+            nn.Conv2d(encoder_input, hidden, kernel_size=1, bias=False),
             nn.BatchNorm2d(hidden),
             nn.SiLU(),
             nn.Dropout2d(0.2),
+
+            nn.Conv2d(hidden, hidden, kernel_size=1, bias=False),
+            nn.BatchNorm2d(hidden),
+            nn.SiLU(),
+            nn.Dropout2d(0.2),
+
             nn.Conv2d(hidden, vision_context_size, kernel_size=1)
         )
 
-        # todo : 레이어 깊이 변경 = 시각 정보 분석 능력 상승
+        # todo : 레이어 깊이 변경
         # 이미지 분류기 헤더
-        classifier_head_hidden = num_classes * 2
+        classifier_head_hidden = vision_context_size // 2
         self.classifier_head = nn.Sequential(
             nn.Conv2d(vision_context_size, classifier_head_hidden, kernel_size=1, bias=False),
             nn.BatchNorm2d(classifier_head_hidden),
             nn.SiLU(),
             nn.Dropout2d(0.2),
+
             nn.Conv2d(classifier_head_hidden, num_classes, kernel_size=1)
         )
 
