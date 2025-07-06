@@ -37,12 +37,12 @@ class EssenceNet(nn.Module):
         # 작은 선만으로는 아무 정보가 없음. 큰 형태에서 작은 디테일로 정보가 보정 되는 것이 자연스러움
         self.feats_convs = nn.ModuleList([
             _single_conv_block(1, 2048, 1024, 256, 256, 0, 0.0, 1),  # 256x256 -> 1x1
-            _single_conv_block(1, 1024, 512, 128, 128, 0, 0.3, 2),  # 256x256 -> 2x2
-            _single_conv_block(1, 512, 256, 64, 64, 0, 0.25, 3),  # 256x256 -> 4x4
-            _single_conv_block(1, 256, 128, 32, 32, 0, 0.2, 5),  # 256x256 -> 8x8
-            _single_conv_block(1, 128, 64, 16, 16, 0, 0.15, 5),  # 256x256 -> 16x16
-            _single_conv_block(1, 64, 32, 8, 8, 0, 0.1, 5),  # 256x256 -> 32x32
-            _single_conv_block(1, 32, 16, 4, 4, 0, 0.05, 5),  # 256x256 -> 64x64
+            _single_conv_block(1, 1024, 512, 128, 128, 0, 0.1, 2),  # 256x256 -> 2x2
+            _single_conv_block(1, 512, 256, 64, 64, 0, 0.1, 2),  # 256x256 -> 4x4
+            _single_conv_block(1, 256, 128, 32, 32, 0, 0.1, 3),  # 256x256 -> 8x8
+            _single_conv_block(1, 128, 64, 16, 16, 0, 0.1, 3),  # 256x256 -> 16x16
+            _single_conv_block(1, 64, 32, 8, 8, 0, 0.05, 3),  # 256x256 -> 32x32
+            _single_conv_block(1, 32, 16, 4, 4, 0, 0.05, 3),  # 256x256 -> 64x64
             _single_conv_block(1, 16, 8, 3, 2, 1, 0.05, 5),  # 256x256 -> 128x128
         ])
 
@@ -73,7 +73,6 @@ class EssenceNet(nn.Module):
 
 # ----------------------------------------------------------------------------------------------------------------------
 # (EssenceNet 이미지 분류기)
-# todo : vision_context 를 사용하는 방식 수정해보기 : 지금처럼 concat 하지 말고 residual 처럼 더하고 norm 하는 방식
 class EssenceNetClassifier(nn.Module):
     def __init__(self, num_classes: int):
         super().__init__()
@@ -89,16 +88,14 @@ class EssenceNetClassifier(nn.Module):
 
         # todo : 레이어 깊이 변경
         # 시각 정보 인코더 리스트
+        accum_channels = 0
         self.vision_context_encoders = nn.ModuleList()
-        for idx, ch in enumerate(feat_channels):
-            if idx == 0:
-                input_ch = ch
-            else:
-                input_ch = ch + vision_context_size
-            hidden = input_ch // 2
+        for ch in feat_channels:
+            accum_channels += ch
+            hidden = vision_context_size * 2
             self.vision_context_encoders.append(
                 nn.Sequential(
-                    nn.Conv2d(input_ch, hidden, kernel_size=1, bias=False),
+                    nn.Conv2d(accum_channels, hidden, kernel_size=1, bias=False),
                     nn.BatchNorm2d(hidden),
                     nn.SiLU(),
                     nn.Dropout2d(0.2),
@@ -108,7 +105,7 @@ class EssenceNetClassifier(nn.Module):
 
         # todo : 레이어 깊이 변경
         # 이미지 분류기 헤더
-        classifier_head_hidden = vision_context_size // 2
+        classifier_head_hidden = num_classes * 2
         self.classifier_head = nn.Sequential(
             nn.Conv2d(vision_context_size, classifier_head_hidden, kernel_size=1, bias=False),
             nn.BatchNorm2d(classifier_head_hidden),
@@ -118,65 +115,36 @@ class EssenceNetClassifier(nn.Module):
         )
 
     def forward(self, x):
-        # 이미지 특징맵 피라미드 추출
+        logits_list = []
+        accum_chained_feats = []
+
+        # 백본 특징맵 피라미드 추출
         feats = self.backbone(x)
 
-        # 첫번째 특징맵 분석
-        vision_vector = self.vision_context_encoders[0](feats[0])
-        logits = self.classifier_head(vision_vector)
-
-        for i in range(1, len(feats)):
+        # 특징맵 피라미드 순회
+        for i in range(len(feats)):
             feat_i = feats[i]
-            B, C, H, W = feat_i.shape
+            b, c, h, w = feat_i.shape
 
-            # vision_vector 크기 맞추기
-            if vision_vector.shape[2:] != (H, W):
-                vision_vector = F.interpolate(vision_vector, size=(H, W), mode='nearest')
+            # 누적된 피쳐 + 현재 피쳐 합치기
+            all_prev_feat = torch.cat(
+                [F.interpolate(f, size=(h, w), mode='nearest') for f in accum_chained_feats] + [feat_i],
+                dim=1
+            ) if accum_chained_feats else feat_i
 
-            # 현재 특징맵과 이전 vision vector concat
-            concat_input = torch.cat([feat_i, vision_vector], dim=1)
-
-            # vision context encoding
-            vision_vector = self.vision_context_encoders[i](concat_input)
-
-            # 이번 로짓 벡터 추출
+            # 피처 인코딩 및 로짓 추출
+            vision_vector = self.vision_context_encoders[i](all_prev_feat)
             logits_i = self.classifier_head(vision_vector)
 
-            # 이전 logits 업샘플링
-            prev_logits = F.interpolate(logits, size=(H, W), mode='nearest')
+            logits_list.append(logits_i)
+            accum_chained_feats.append(feat_i)
 
-            # 정규화: (mean, std) 기준
-            mean1, std1 = prev_logits.mean(dim=(1, 2, 3), keepdim=True), prev_logits.std(dim=(1, 2, 3), keepdim=True)
-            mean2, std2 = logits_i.mean(dim=(1, 2, 3), keepdim=True), logits_i.std(dim=(1, 2, 3), keepdim=True)
+        # classifier_head 로 추출한 모든 logits 를 전부 누적
+        flat_logits_all = [logits.view(b, logits.shape[1], -1) for logits in logits_list]
+        all_logits_flat = torch.cat(flat_logits_all, dim=2)
 
-            prev_logits_norm = (prev_logits - mean1) / (std1 + 1e-5)
-            logits_i_norm = (logits_i - mean2) / (std2 + 1e-5)
-
-            # 정규화된 두 로짓을 합산
-            logits = prev_logits_norm + logits_i_norm
-
-        # 최종 logits: (B, num_classes, 128, 128)
-        B, C, H, W = logits.shape
-        flat_logits = logits.view(B, C, -1).permute(0, 2, 1)  # (B, H*W, num_classes)
-
-        final_outputs = []
-        for b in range(B):
-            logits_b = flat_logits[b]  # (H*W, num_classes)
-            max_val, _ = logits_b.max(dim=1)
-            max_pos = max_val.argmax()
-            class_id = logits_b[max_pos].argmax()
-
-            class_mask = logits_b.argmax(dim=1) == class_id
-            selected_logits = logits_b[class_mask]  # (M, num_classes)
-
-            class_scores = selected_logits[:, class_id]
-            median_score = class_scores.median()
-            diff = (class_scores - median_score).abs()
-            idx = diff.argmin()
-
-            final_outputs.append(selected_logits[idx])  # (num_classes,)
-
-        return torch.stack(final_outputs, dim=0)  # (B, num_classes)
+        final_outputs = all_logits_flat.sum(dim=2)
+        return final_outputs
 
 # 추론시 동작 :
 # 위 백본에서 추출된 피쳐맵 피라미드에서 1x1 특징맵부터 128x128 특징맵을 f1, f2, f3, f4, f5, f6, f7, f8 이라고 하겠습니다.
