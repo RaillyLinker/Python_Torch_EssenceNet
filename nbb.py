@@ -17,9 +17,15 @@ def _single_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, dp, bs):
         DropBlock2D(drop_prob=dp, block_size=bs),
 
         # 픽셀별 의미 추출
+        nn.Conv2d(mid_ch, mid_ch, kernel_size=1, stride=1, padding=0, bias=False),
+        nn.BatchNorm2d(mid_ch),
+        nn.SiLU(),
+        nn.Dropout2d(0.2),
+
         nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
         nn.BatchNorm2d(out_ch),
-        nn.SiLU()
+        nn.SiLU(),
+        nn.Dropout2d(0.2)
     )
 
 
@@ -96,6 +102,11 @@ class EssenceNetClassifier(nn.Module):
         hidden = encoder_input // 2
         self.vision_context_encoder = nn.Sequential(
             nn.Conv2d(encoder_input, hidden, kernel_size=1, bias=False),
+            nn.BatchNorm2d(hidden),
+            nn.SiLU(),
+            nn.Dropout2d(0.2),
+
+            nn.Conv2d(hidden, hidden, kernel_size=1, bias=False),
             nn.BatchNorm2d(hidden),
             nn.SiLU(),
             nn.Dropout2d(0.2),
