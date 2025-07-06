@@ -43,8 +43,7 @@ class EssenceNet(nn.Module):
             _single_conv_block(1, 256, 128, 32, 32, 0, 0.1, 3),  # 256x256 -> 8x8
             _single_conv_block(1, 128, 64, 16, 16, 0, 0.1, 3),  # 256x256 -> 16x16
             _single_conv_block(1, 64, 32, 8, 8, 0, 0.05, 3),  # 256x256 -> 32x32
-            _single_conv_block(1, 32, 16, 4, 4, 0, 0.05, 3),  # 256x256 -> 64x64
-            _single_conv_block(1, 16, 8, 3, 2, 1, 0.05, 5),  # 256x256 -> 128x128
+            _single_conv_block(1, 32, 16, 4, 4, 0, 0.05, 3)  # 256x256 -> 64x64
         ])
 
     def forward(self, x):
@@ -81,28 +80,26 @@ class EssenceNetClassifier(nn.Module):
         self.backbone = EssenceNet()
 
         # 백본 추출 특징맵 피라미드 채널 개수
-        feat_channels = [1027, 515, 259, 131, 67, 35, 19, 11]
+        feat_channels = [1027, 515, 259, 131, 67, 35, 19]
+
+        # 식별 가능 특징맵 인덱스 선정
+        self.total_levels = len(feat_channels)
+        self.identify_idx = self.total_levels - 1
 
         # todo : 벡터 사이즈 변경 = 시각 정보 표현력 상승
         # 시각 정보 벡터의 사이즈
         vision_context_size = 1024
 
         # todo : 레이어 깊이 변경 = 시각 정보 인코딩 표현력 상승
-        # 시각 정보 인코더 리스트
-        accum_channels = 0
-        self.vision_context_encoders = nn.ModuleList()
-        for ch in feat_channels:
-            accum_channels += ch
-            hidden = vision_context_size * 2
-            self.vision_context_encoders.append(
-                nn.Sequential(
-                    nn.Conv2d(accum_channels, hidden, kernel_size=1, bias=False),
-                    nn.BatchNorm2d(hidden),
-                    nn.SiLU(),
-                    nn.Dropout2d(0.2),
-                    nn.Conv2d(hidden, vision_context_size, kernel_size=1)
-                )
-            )
+        # 이미지 인코더
+        hidden = vision_context_size * 2
+        self.vision_context_encoder = nn.Sequential(
+            nn.Conv2d(sum(feat_channels[:self.identify_idx + 1]), hidden, kernel_size=1, bias=False),
+            nn.BatchNorm2d(hidden),
+            nn.SiLU(),
+            nn.Dropout2d(0.2),
+            nn.Conv2d(hidden, vision_context_size, kernel_size=1)
+        )
 
         # todo : 레이어 깊이 변경 = 시각 정보 분석 능력 상승
         # 이미지 분류기 헤더
@@ -116,8 +113,6 @@ class EssenceNetClassifier(nn.Module):
         )
 
     def forward(self, x):
-        logits_list = []
-
         # 백본 특징맵 피라미드 추출
         feats = self.backbone(x)
 
@@ -131,19 +126,22 @@ class EssenceNetClassifier(nn.Module):
             for i, f in enumerate(feats)
         ]
 
-        # 특징맵 피라미드 순회
-        for i in range(len(feats)):
+        # 특징맵 피라미드 순회 및 logit 벡터 수집
+        logits_list = []
+        for i in range(self.total_levels):
             feat_i = feats[i]
             prev_feats = [upsampled_feats[k][i] for k in range(i)]
 
-            # concat
-            all_prev_feat = torch.cat(prev_feats + [feat_i], dim=1) if i > 0 else feat_i
-
-            # 피처 인코딩 및 로짓 추출
-            vision_vector = self.vision_context_encoders[i](all_prev_feat)
-            logits_i = self.classifier_head(vision_vector)
-
-            logits_list.append(logits_i)
+            # 마지막 레벨만 encoder+head 적용
+            if i == self.identify_idx:
+                # 특징 concat
+                prev_feat = torch.cat(prev_feats + [feat_i], dim=1) if i > 0 else feat_i
+                # 비전 인코딩
+                vision_vec = self.vision_context_encoder(prev_feat)
+                # 클래스 분류
+                logits_i = self.classifier_head(vision_vec)
+                # logits 벡터 리스트 저장
+                logits_list.append(logits_i)
 
         # classifier_head 로 추출한 모든 logits 를 전부 누적
         b = x.shape[0]
