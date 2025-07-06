@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from dropblock import DropBlock2D
 
 
+# todo : 1x1 conv 깊이 더 추가 = 표현력 상승
 # (2D 특징 추출 블록)
 # 말 그대로 2차원 특징 추출만 수행
 def _single_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, dp, bs):
@@ -30,7 +31,7 @@ class EssenceNet(nn.Module):
         # 흑백 변환 가중치 저장
         self.register_buffer("rgb2gray", torch.tensor([0.299, 0.587, 0.114]).view(1, 3, 1, 1))
 
-        # todo 채널 변경
+        # todo conv 채널 추가 = conv3 위치 정보 판별 척도 상승, conv1 표현력 상승
         # 구역별 멀티 스케일 분석
         # 2D 데이터의 형태적 특징을 멀티 스케일로 추출 하기 위해 1채널 오리진 정보를 N번 입력
         # 전역적 정보를 지역적 정보로 투영하기 위해 커널이 큰 순서대로 배치
@@ -60,7 +61,7 @@ class EssenceNet(nn.Module):
         # conv 특징 추출
         k_feats_list = [conv(gray_feats) for conv in self.feats_convs]
 
-        # color_feats 를 k_feats 크기에 맞게 리사이즈
+        # color_feats 를 k_feats 크기에 맞게 리사이즈 (area = 다운 샘플링 평균값)
         k_sizes = [(f.shape[2], f.shape[3]) for f in k_feats_list]
         resized_colors = [F.interpolate(color_feats, size=size, mode='area') for size in k_sizes]
 
@@ -82,11 +83,11 @@ class EssenceNetClassifier(nn.Module):
         # 백본 추출 특징맵 피라미드 채널 개수
         feat_channels = [1027, 515, 259, 131, 67, 35, 19, 11]
 
-        # todo : 벡터 사이즈 변경
+        # todo : 벡터 사이즈 변경 = 시각 정보 표현력 상승
         # 시각 정보 벡터의 사이즈
         vision_context_size = 1024
 
-        # todo : 레이어 깊이 변경
+        # todo : 레이어 깊이 변경 = 시각 정보 인코딩 표현력 상승
         # 시각 정보 인코더 리스트
         accum_channels = 0
         self.vision_context_encoders = nn.ModuleList()
@@ -103,7 +104,7 @@ class EssenceNetClassifier(nn.Module):
                 )
             )
 
-        # todo : 레이어 깊이 변경
+        # todo : 레이어 깊이 변경 = 시각 정보 분석 능력 상승
         # 이미지 분류기 헤더
         classifier_head_hidden = num_classes * 2
         self.classifier_head = nn.Sequential(
@@ -116,30 +117,36 @@ class EssenceNetClassifier(nn.Module):
 
     def forward(self, x):
         logits_list = []
-        accum_chained_feats = []
 
         # 백본 특징맵 피라미드 추출
         feats = self.backbone(x)
 
+        # 각 레벨의 해상도 크기 추출
+        feat_sizes = [f.shape[2:] for f in feats]
+
+        # 이전까지의 특징맵을 현재 해상도(i)에 맞춰 업샘플링
+        upsampled_feats = [
+            [F.interpolate(f, size=feat_sizes[j], mode='nearest') if i != j else f
+             for j in range(len(feats))]
+            for i, f in enumerate(feats)
+        ]
+
         # 특징맵 피라미드 순회
         for i in range(len(feats)):
             feat_i = feats[i]
-            b, c, h, w = feat_i.shape
+            prev_feats = [upsampled_feats[k][i] for k in range(i)]
 
-            # 누적된 피쳐 + 현재 피쳐 합치기
-            all_prev_feat = torch.cat(
-                [F.interpolate(f, size=(h, w), mode='nearest') for f in accum_chained_feats] + [feat_i],
-                dim=1
-            ) if accum_chained_feats else feat_i
+            # concat
+            all_prev_feat = torch.cat(prev_feats + [feat_i], dim=1) if i > 0 else feat_i
 
             # 피처 인코딩 및 로짓 추출
             vision_vector = self.vision_context_encoders[i](all_prev_feat)
             logits_i = self.classifier_head(vision_vector)
 
             logits_list.append(logits_i)
-            accum_chained_feats.append(feat_i)
 
         # classifier_head 로 추출한 모든 logits 를 전부 누적
+        b = x.shape[0]
         flat_logits_all = [logits.view(b, logits.shape[1], -1) for logits in logits_list]
         all_logits_flat = torch.cat(flat_logits_all, dim=2)
 
