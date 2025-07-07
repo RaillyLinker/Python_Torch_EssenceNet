@@ -29,6 +29,7 @@ def _single_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, dp, bs):
     )
 
 
+# todo : 컨셉 바꾸기 : 그냥 일반 cnn 처럼 3x3 conv 를 중첩하기
 # (EssenceNet 백본)
 class EssenceNet(nn.Module):
     def __init__(self):
@@ -74,6 +75,36 @@ class EssenceNet(nn.Module):
         feats_list = [torch.cat([rc, kf], dim=1) for rc, kf in zip(resized_colors, k_feats_list)]
 
         # 최종 특징(1, 2, 4, 8, 16, 32, 64, 128 사이즈 특징 피라미드)
+        return feats_list
+
+
+# (EssenceNet 백본)
+class EssenceNet2(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        # todo conv 채널 변경
+        self.feats_convs = nn.ModuleList([
+            _single_conv_block(3, 32, 16, 3, 2, 1, 0.05, 3),  # 320x320 -> 160x160
+            _single_conv_block(16, 64, 32, 3, 2, 1, 0.05, 3),  # 160x160 -> 80x80
+            _single_conv_block(32, 128, 64, 3, 2, 1, 0.05, 3),  # 80x80 -> 40x40
+            _single_conv_block(64, 256, 128, 3, 2, 1, 0.1, 3),  # 40x40 -> 20x20
+            _single_conv_block(128, 512, 256, 3, 2, 1, 0.1, 3),  # 20x20 -> 10x10
+            _single_conv_block(256, 1024, 512, 3, 2, 1, 0.1, 2),  # 10x10 -> 5x5
+            _single_conv_block(512, 2048, 1024, 3, 2, 1, 0.1, 2),  # 5x5 -> 3x3
+            _single_conv_block(1024, 4096, 2048, 3, 1, 0, 0.0, 1),  # 3x3 -> 1x1
+        ])
+
+    def forward(self, x):
+        assert x.shape[1] == 3, "Input tensor must have 3 channels (RGB)."
+
+        feats_list = []
+        feat = x
+
+        for conv in self.feats_convs:
+            feat = conv(feat)
+            feats_list.append(feat)
+
         return feats_list
 
 

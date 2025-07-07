@@ -60,7 +60,7 @@ class RandomizedGaussianBlur:
 
 
 train_transform = transforms.Compose([
-    transforms.RandomResizedCrop(256, scale=(0.5, 1.0), ratio=(0.75, 1.33)),
+    transforms.RandomResizedCrop(320, scale=(0.5, 1.0), ratio=(0.75, 1.33)),
     transforms.RandomHorizontalFlip(p=0.5),
     transforms.RandomApply([ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
     RandomizedGaussianBlur(p=0.3),
@@ -71,8 +71,8 @@ train_transform = transforms.Compose([
 ])
 
 val_transform = transforms.Compose([
-    transforms.Resize(288),
-    transforms.CenterCrop(256),
+    transforms.Resize(350),
+    transforms.CenterCrop(320),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
@@ -99,10 +99,10 @@ if __name__ == "__main__":
     # ----------------------------
     # 데이터셋 로드 또는 전처리
     # ----------------------------
-    if os.path.exists("C:/dataset/processed_food101/train") and os.path.exists("C:/dataset/processed_food101/val"):
+    if os.path.exists("F:/dataset/processed_food101/train") and os.path.exists("F:/dataset/processed_food101/val"):
         print("전처리된 데이터셋 로딩 중...")
-        train_ds = load_from_disk("C:/dataset/processed_food101/train")
-        val_ds = load_from_disk("C:/dataset/processed_food101/val")
+        train_ds = load_from_disk("F:/dataset/processed_food101/train")
+        val_ds = load_from_disk("F:/dataset/processed_food101/val")
     else:
         print("전처리 중 (최초 실행 시 1회)...")
         raw_train_ds = load_dataset(
@@ -122,8 +122,8 @@ if __name__ == "__main__":
         train_ds = train_ds.filter(lambda x: x is not None, num_proc=worker_count)
         val_ds = val_ds.filter(lambda x: x is not None, num_proc=worker_count)
 
-        train_ds.save_to_disk("C:/dataset/processed_food101/train")
-        val_ds.save_to_disk("C:/dataset/processed_food101/val")
+        train_ds.save_to_disk("F:/dataset/processed_food101/train")
+        val_ds.save_to_disk("F:/dataset/processed_food101/val")
         print("전처리 및 저장 완료.")
 
     train_ds.set_format(type='torch', columns=['pixel_values', 'label'])
