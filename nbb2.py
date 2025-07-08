@@ -66,7 +66,7 @@ class EssenceNetClassifier(nn.Module):
 
         # todo : 벡터 사이즈 변경
         # 시각 정보 벡터의 사이즈
-        vision_context_size = 2048
+        vision_context_size = 1024
 
         # todo : 채널, 깊이 변경
         # 시각 컨텍스트 인코더
