@@ -17,14 +17,9 @@ def _single_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, dp, bs):
         DropBlock2D(drop_prob=dp, block_size=bs),
 
         # 픽셀별 의미 추출
-        nn.Conv2d(mid_ch, mid_ch, kernel_size=1, stride=1, padding=0, bias=False),
-        nn.BatchNorm2d(mid_ch),
-        nn.SiLU(),
-
         nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
         nn.BatchNorm2d(out_ch),
-        nn.SiLU(),
-        nn.Dropout2d(0.2)
+        nn.SiLU()
     )
 
 
@@ -45,23 +40,13 @@ class EssenceNet(nn.Module):
             _single_conv_block(1024, 4096, 2048, 3, 1, 0, 0.0, 1),  # 3x3 -> 1x1
         ])
 
-        # 자동 채널 추출 기반 residual projection 생성
-        self.res_projs = nn.ModuleList()
-
-        for conv_block in self.feats_convs:
-            layers = [m for m in conv_block.modules() if isinstance(m, nn.Conv2d)]
-            self.res_projs.append(nn.Conv2d(layers[0].in_channels, layers[-1].out_channels, kernel_size=1, bias=False))
-
     def forward(self, x):
         assert x.shape[1] == 3, "Input tensor must have 3 channels (RGB)."
 
         feats_list = []
         feat = x
-        for conv, res_proj in zip(self.feats_convs, self.res_projs):
-            res = feat
+        for conv in self.feats_convs:
             feat = conv(feat)
-            res_proj = F.interpolate(res_proj(res), size=feat.shape[2:], mode='area')
-            feat = feat + res_proj
             feats_list.append(feat)
 
         return feats_list
@@ -79,6 +64,7 @@ class EssenceNetClassifier(nn.Module):
         feat_channels = [16, 32, 64, 128, 256, 512, 1024, 2048]
         encoder_input = sum(c for c in feat_channels)
 
+        # todo : 벡터 사이즈 변경
         # 시각 정보 벡터의 사이즈
         vision_context_size = 2048
 
