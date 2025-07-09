@@ -30,6 +30,7 @@ def _double_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, dp, bs):
     )
 
 
+# todo : 처음엔 kirsch 를 적용 + 3배수로 처리해보기(243, 81, 27, 9, 3)
 # (EssenceNet 백본)
 class EssenceNet(nn.Module):
     def __init__(self):
@@ -42,8 +43,8 @@ class EssenceNet(nn.Module):
         self.feats_convs = nn.ModuleList([
             _single_conv_block(1, 8, 3, 2, 1),  # 320x320 -> 160x160
             _single_conv_block(8, 16, 3, 2, 1),  # 160x160 -> 80x80
-            _double_conv_block(16, 64, 32, 3, 2, 1, 0.05, 3),  # 80x80 -> 40x40
-            _double_conv_block(32, 128, 64, 3, 2, 1, 0.1, 3),  # 40x40 -> 20x20
+            _single_conv_block(16, 32, 3, 2, 1),  # 80x80 -> 40x40
+            _single_conv_block(32, 64, 3, 2, 1),  # 40x40 -> 20x20
             _double_conv_block(64, 256, 128, 3, 2, 1, 0.1, 3),  # 20x20 -> 10x10
             _double_conv_block(128, 512, 256, 3, 2, 1, 0.1, 2),  # 10x10 -> 5x5
             _double_conv_block(256, 1024, 512, 3, 2, 1, 0.1, 2),  # 5x5 -> 3x3
@@ -54,14 +55,12 @@ class EssenceNet(nn.Module):
         assert x.shape[1] == 3, "Input tensor must have 3 channels (RGB)."
         feats_list = []
 
-        # 컬러 이미지
-        # (B, 3, 256, 256)
-        color_feats = x
-        feats_list.append(color_feats)
-
         # 순수 하게 CNN 형태 분석을 위한 흑백 변환
-        # (B, 1, 256, 256)
-        gray_feats = (color_feats * self.rgb2gray.to(x.device, x.dtype)).sum(dim=1, keepdim=True)
+        gray_feats = (x * self.rgb2gray.to(x.device, x.dtype)).sum(dim=1, keepdim=True)
+
+        # 컬러 이미지(해상도 반토막)
+        color_feats = torch.nn.functional.interpolate(x, size=(x.shape[2] // 2, x.shape[3] // 2), mode='area')
+        feats_list.append(color_feats)
 
         feat = gray_feats
         for conv in self.feats_convs:

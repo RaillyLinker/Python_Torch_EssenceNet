@@ -6,7 +6,8 @@ import torch
 import torch.optim as optim
 import torchvision.transforms.functional as F
 from datasets import load_dataset, load_from_disk
-from torch.amp import GradScaler, autocast
+from torch.cuda.amp import GradScaler
+from torch.amp import autocast
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
@@ -101,16 +102,22 @@ def apply_ade_transform(example, mode: str):
 
 
 # 한 epoch 학습
-def train_epoch(model, loader, optimizer, device, scaler, criterion_fn, use_amp):
+def train_epoch(model, loader, optimizer, device, scaler, criterion_fn, use_amp, writer, epoch):
     model.train()
     running_loss = 0
-    for batch in tqdm(loader, desc='Train', leave=False):
+    correct_pixels = 0
+    total_pixels = 0
+
+    for batch_idx, batch in enumerate(tqdm(loader, desc='Train', leave=False)):
         imgs = batch['pixel_values'].to(device)
         masks = batch['labels'].to(device)
         optimizer.zero_grad()
+
+        # --- forward & loss ---
         if use_amp:
-            with autocast():
+            with autocast("cuda"):
                 outputs = model(imgs)
+                # resize if needed
                 if outputs.shape[-2:] != masks.shape[-2:]:
                     outputs = torch.nn.functional.interpolate(
                         outputs, size=masks.shape[-2:], mode='bilinear', align_corners=False
@@ -131,14 +138,33 @@ def train_epoch(model, loader, optimizer, device, scaler, criterion_fn, use_amp)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+
         running_loss += loss.item() * imgs.size(0)
-    return running_loss / len(loader.dataset)
+
+        # --- accuracy 계산 (ignore_index 제외) ---
+        preds = torch.argmax(outputs, dim=1)
+        valid_mask = masks != 255  # ignore_index == 255
+        correct_pixels += (preds[valid_mask] == masks[valid_mask]).sum().item()
+        total_pixels += valid_mask.sum().item()
+
+    # --- epoch 단위 평균 loss & accuracy ---
+    avg_loss = running_loss / len(loader.dataset)
+    train_acc = correct_pixels / total_pixels if total_pixels > 0 else 0.0
+
+    # --- 화면 출력 및 TensorBoard 기록 ---
+    print(f"Train Loss: {avg_loss:.4f} | Train Acc: {train_acc * 100:.2f}%")
+    writer.add_scalar('Loss/train', avg_loss, epoch)
+    writer.add_scalar('Accuracy/train', train_acc, epoch)
+
+    return avg_loss, train_acc
 
 
 # 한 epoch 검증
 def eval_epoch(model, loader, device, criterion_fn):
     model.eval()
     running_loss = 0
+    correct_pixels = 0
+    total_pixels = 0
     with torch.no_grad():
         for batch in tqdm(loader, desc='Val', leave=False):
             imgs = batch['pixel_values'].to(device)
@@ -150,7 +176,16 @@ def eval_epoch(model, loader, device, criterion_fn):
                 )
             loss = criterion_fn(outputs, masks)
             running_loss += loss.item() * imgs.size(0)
-    return running_loss / len(loader.dataset)
+
+            # 🔍 정확도 계산
+            preds = torch.argmax(outputs, dim=1)  # 예측 클래스
+            mask_valid = masks != 255  # ignore index 마스크
+            correct_pixels += (preds[mask_valid] == masks[mask_valid]).sum().item()
+            total_pixels += mask_valid.sum().item()
+
+    avg_loss = running_loss / len(loader.dataset)
+    accuracy = correct_pixels / total_pixels if total_pixels > 0 else 0.0
+    return avg_loss, accuracy
 
 
 # 메인 함수
@@ -167,10 +202,10 @@ def main():
     ds = load_dataset("1aurent/ADE20K")
 
     # train_raw = ds['train']
-    # val_raw = ds.get('validation', ds.get('val'))
+    # val_raw = ds['validation']
 
-    train_raw = ds['train'][:100]
-    val_raw = ds['validation'][:50]
+    train_raw = ds['train'].select(range(100))
+    val_raw = ds['validation'].select(range(50))
 
     if not os.path.exists(TRAIN_DISK_PATH):
         train_ds = train_raw.map(lambda x: apply_ade_transform(x, 'train'), num_proc=1)
@@ -212,13 +247,17 @@ def main():
 
     for epoch in range(1, max_epochs + 1):
         print(f"\nEpoch {epoch}/{max_epochs}")
-        train_loss = train_epoch(model, train_loader, optimizer,
-                                 device, scaler, criterion_fn, use_amp)
-        val_loss = eval_epoch(model, val_loader, device, criterion_fn)
+        train_loss, train_acc = train_epoch(
+            model, train_loader, optimizer, device, scaler,
+            criterion_fn, use_amp, writer, epoch
+        )
+        val_loss, val_acc = eval_epoch(model, val_loader, device, criterion_fn)
 
-        writer.add_scalar('Loss/train', train_loss, epoch)
+        # 기존 writer 기록은 train_epoch 내부에서 했으니 val만 추가
         writer.add_scalar('Loss/val', val_loss, epoch)
-        print(f"Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
+        writer.add_scalar('Accuracy/val', val_acc, epoch)
+
+        print(f"Val   Loss: {val_loss:.4f} | Val   Acc: {val_acc * 100:.2f}%")
 
         scheduler.step()
 
