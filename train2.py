@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import torch.optim as optim
 import torchvision.transforms.functional as F
-from datasets import load_dataset, load_from_disk
+from datasets import load_dataset, load_from_disk, concatenate_datasets
 from torch.cuda.amp import GradScaler
 from torch.amp import autocast
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -15,6 +15,7 @@ from torchvision import transforms
 from torchvision.transforms import ColorJitter, InterpolationMode
 from PIL import Image
 from tqdm import tqdm
+import math
 
 from nbb2 import EssenceNetSegmenter
 
@@ -35,7 +36,59 @@ TRAIN_DISK_PATH = "C:/dataset/ade20k/train"
 VAL_DISK_PATH = "C:/dataset/ade20k/val"
 LOG_DIR = "runs/ade_exp"
 CHECKPOINT_DIR = "checkpoints"
-INPUT_SIZE = 320
+INPUT_SIZE = 243
+
+
+def apply_ade_transform_batch(batch, mode: str):
+    images = []
+    labels = []
+    for img, inst in zip(batch['image'], batch['instances']):
+        image = img.convert('RGB')
+        mask = inst[0].convert('L')
+        if mode == 'train':
+            img_t, m_t = joint_transform(image, mask)
+        else:
+            img_t, m_t = val_joint_transform(image, mask)
+        images.append(img_t)
+        labels.append(process_mask(m_t))
+    return {'pixel_values': images, 'labels': labels}
+
+
+def process_in_chunks(dataset, chunk_size, mode, save_dir, num_workers):
+    os.makedirs(save_dir, exist_ok=True)
+    total_len = len(dataset)
+    num_chunks = math.ceil(total_len / chunk_size)
+    print(f"Total samples: {total_len}, chunks: {num_chunks}")
+
+    chunk_paths = []
+
+    for i in range(num_chunks):
+        start = i * chunk_size
+        end = min((i + 1) * chunk_size, total_len)
+        chunk = dataset.select(range(start, end))
+
+        print(f"Processing chunk {i + 1}/{num_chunks} ({start}~{end})...")
+
+        chunk_path = os.path.join(save_dir, f"{mode}_chunk_{i}")
+        if os.path.exists(chunk_path):
+            print(f"Chunk {i + 1} already exists, skipping.")
+            chunk_paths.append(chunk_path)
+            continue
+
+        processed = chunk.map(
+            lambda x: apply_ade_transform_batch(x, mode),
+            batched=True,
+            batch_size=8,
+            num_proc=num_workers
+        )
+
+        processed.save_to_disk(chunk_path)
+        chunk_paths.append(chunk_path)
+
+    # 모든 조각 불러와서 병합
+    all_chunks = [load_from_disk(p) for p in chunk_paths]
+    full_dataset = concatenate_datasets(all_chunks)
+    return full_dataset
 
 
 # joint 이미지·마스크 공간 변형 함수
@@ -201,28 +254,27 @@ def main():
     # prepare dataset
     ds = load_dataset("1aurent/ADE20K")
 
-    # train_raw = ds['train']
-    # val_raw = ds['validation']
+    train_raw = ds['train']
+    val_raw = ds['validation']
 
-    train_raw = ds['train'].select(range(100))
-    val_raw = ds['validation'].select(range(50))
+    # train_raw = ds['train'].select(range(100))
+    # val_raw = ds['validation'].select(range(50))
+    num_workers = 4
 
     if not os.path.exists(TRAIN_DISK_PATH):
-        train_ds = train_raw.map(lambda x: apply_ade_transform(x, 'train'), num_proc=1)
-        train_ds.save_to_disk(TRAIN_DISK_PATH)
+        train_ds = process_in_chunks(train_raw, chunk_size=500, mode='train', save_dir=TRAIN_DISK_PATH,
+                                     num_workers=num_workers)
     else:
         train_ds = load_from_disk(TRAIN_DISK_PATH)
 
     if not os.path.exists(VAL_DISK_PATH):
-        val_ds = val_raw.map(lambda x: apply_ade_transform(x, 'val'), num_proc=1)
-        val_ds.save_to_disk(VAL_DISK_PATH)
+        val_ds = process_in_chunks(val_raw, chunk_size=200, mode='val', save_dir=VAL_DISK_PATH, num_workers=num_workers)
     else:
         val_ds = load_from_disk(VAL_DISK_PATH)
 
     train_ds.set_format(type='torch', columns=['pixel_values', 'labels'])
     val_ds.set_format(type='torch', columns=['pixel_values', 'labels'])
 
-    num_workers = 0 if os.name == 'nt' else 4
     pin_mem = device.type == 'cuda'
     train_loader = DataLoader(train_ds, batch_size=8, shuffle=True,
                               num_workers=num_workers, pin_memory=pin_mem)
