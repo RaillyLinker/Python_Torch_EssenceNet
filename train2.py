@@ -1,12 +1,11 @@
 import os
-import shutil
 import random
 import numpy as np
 import torch
 import torch.optim as optim
 import torchvision.transforms.functional as F
 from datasets import load_dataset, load_from_disk, concatenate_datasets
-from torch.cuda.amp import GradScaler
+from torch.amp import GradScaler
 from torch.amp import autocast
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
@@ -16,6 +15,7 @@ from torchvision.transforms import ColorJitter, InterpolationMode
 from PIL import Image
 from tqdm import tqdm
 import math
+import shutil
 
 from nbb2 import EssenceNetSegmenter
 
@@ -40,17 +40,27 @@ INPUT_SIZE = 243
 
 
 def apply_ade_transform_batch(batch, mode: str):
-    images = []
-    labels = []
-    for img, segs in zip(batch['image'], batch['segmentations']):
-        image = img.convert('RGB')
-        mask = segs[0].convert('L')
-        if mode == 'train':
-            img_t, m_t = joint_transform(image, mask)
-        else:
-            img_t, m_t = val_joint_transform(image, mask)
+    images, labels = [], []
+    for img, mask in zip(batch["image"], batch["annotation"]):
+        img_t, m_t = (joint_transform if mode == 'train' else val_joint_transform)(img, mask)
+        # PIL/Tensor → numpy int64
+        m_arr = (np.array(m_t, dtype=np.int64)
+                 if isinstance(m_t, Image.Image)
+                 else (m_t.numpy().astype(np.int64) if torch.is_tensor(m_t)
+                       else np.array(m_t, dtype=np.int64)))
+        if m_arr.ndim == 3:
+            m_arr = m_arr[0]
+        # ==== 여기를 이렇게 바꿔주세요 ====
+        # 1 ≤ original_label ≤ 150 → 0~149 로 매핑
+        # 그 외 (0 혹은 >150) → 255 (ignore_index)
+        m_arr = np.where((m_arr >= 1) & (m_arr <= NUM_CLASSES),
+                         m_arr - 1,
+                         255)
+        labels.append(torch.tensor(m_arr, dtype=torch.long))
         images.append(img_t)
-        labels.append(process_mask(m_t))
+
+    images = torch.stack(images).numpy()
+    labels = torch.stack(labels).numpy()
     return {'pixel_values': images, 'labels': labels}
 
 
@@ -96,6 +106,8 @@ def process_in_chunks(dataset, chunk_size, mode, save_dir, num_workers):
 
 # joint 이미지·마스크 공간 변형 함수
 def joint_transform(image: Image.Image, mask: Image.Image, size=INPUT_SIZE):
+    if image.mode != "RGB":
+        image = image.convert("RGB")
     # 1) RandomResizedCrop
     i, j, h, w = transforms.RandomResizedCrop.get_params(
         image, scale=(0.5, 1.0), ratio=(0.75, 1.33)
@@ -124,6 +136,8 @@ def joint_transform(image: Image.Image, mask: Image.Image, size=INPUT_SIZE):
 
 
 def val_joint_transform(image: Image.Image, mask: Image.Image, size=INPUT_SIZE):
+    if image.mode != "RGB":
+        image = image.convert("RGB")
     # resize → center crop
     image = F.resize(image, 350, interpolation=InterpolationMode.BILINEAR)
     mask = F.resize(mask, 350, interpolation=InterpolationMode.NEAREST)
@@ -133,14 +147,6 @@ def val_joint_transform(image: Image.Image, mask: Image.Image, size=INPUT_SIZE):
     image = F.to_tensor(image)
     image = F.normalize(image, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     return image, mask
-
-
-# mask 처리 함수 (train과 val 동일하게 적용)
-def process_mask(mask: Image.Image) -> torch.Tensor:
-    arr = np.array(mask, dtype=np.int64)
-    arr[arr == 0] = 255  # ignore index
-    arr[arr != 255] -= 1  # 클래스 index 1~ → 0~ 로 변경
-    return torch.from_numpy(arr)
 
 
 # 한 epoch 학습
@@ -241,7 +247,15 @@ def main():
     use_amp = (device.type == 'cuda')
 
     # prepare dataset
-    ds = load_dataset("1aurent/ADE20K")
+    ds = load_dataset("scene_parse_150", trust_remote_code=True)
+
+    # # 2. 전체 구조 및 column 이름 보기
+    # print(ds)  # DatasetDict({'train': Dataset, 'validation': Dataset})
+    # print(ds['train'].column_names)
+    # print(ds['train'].features)
+    #
+    # # 3. 샘플 출력
+    # print(ds['train'][0])  # 또는 random.sample(ds['train'], 3)
 
     train_raw = ds['train']
     val_raw = ds['validation']
@@ -249,15 +263,17 @@ def main():
     # train_raw = ds['train'].select(range(100))
     # val_raw = ds['validation'].select(range(50))
     num_workers = 4
+    chunk_size = 1000
 
     if not os.path.exists(TRAIN_DISK_PATH):
-        train_ds = process_in_chunks(train_raw, chunk_size=500, mode='train', save_dir=TRAIN_DISK_PATH,
+        train_ds = process_in_chunks(train_raw, chunk_size=chunk_size, mode='train', save_dir=TRAIN_DISK_PATH,
                                      num_workers=num_workers)
     else:
         train_ds = load_from_disk(TRAIN_DISK_PATH)
 
     if not os.path.exists(VAL_DISK_PATH):
-        val_ds = process_in_chunks(val_raw, chunk_size=500, mode='val', save_dir=VAL_DISK_PATH, num_workers=num_workers)
+        val_ds = process_in_chunks(val_raw, chunk_size=chunk_size, mode='val', save_dir=VAL_DISK_PATH,
+                                   num_workers=num_workers)
     else:
         val_ds = load_from_disk(VAL_DISK_PATH)
 
@@ -278,7 +294,7 @@ def main():
     criterion_fn = torch.nn.CrossEntropyLoss(ignore_index=255)
     optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-6)
     scheduler = CosineAnnealingLR(optimizer, T_max=30)
-    scaler = GradScaler()
+    scaler = GradScaler(device)
 
     best_loss = float('inf')
     best_path = None
