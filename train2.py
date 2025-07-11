@@ -42,9 +42,9 @@ INPUT_SIZE = 243
 def apply_ade_transform_batch(batch, mode: str):
     images = []
     labels = []
-    for img, inst in zip(batch['image'], batch['instances']):
+    for img, segs in zip(batch['image'], batch['segmentations']):
         image = img.convert('RGB')
-        mask = inst[0].convert('L')
+        mask = segs[0].convert('L')
         if mode == 'train':
             img_t, m_t = joint_transform(image, mask)
         else:
@@ -88,6 +88,9 @@ def process_in_chunks(dataset, chunk_size, mode, save_dir, num_workers):
     # 모든 조각 불러와서 병합
     all_chunks = [load_from_disk(p) for p in chunk_paths]
     full_dataset = concatenate_datasets(all_chunks)
+
+    full_dataset.save_to_disk(save_dir)
+
     return full_dataset
 
 
@@ -138,20 +141,6 @@ def process_mask(mask: Image.Image) -> torch.Tensor:
     arr[arr == 0] = 255  # ignore index
     arr[arr != 255] -= 1  # 클래스 index 1~ → 0~ 로 변경
     return torch.from_numpy(arr)
-
-
-# dataset 전처리 함수
-def apply_ade_transform(example, mode: str):
-    image = example['image'].convert('RGB')
-    mask = example['instances'][0].convert('L')
-    if mode == 'train':
-        img_t, m_t = joint_transform(image, mask)
-        labels = process_mask(m_t)
-        return {'pixel_values': img_t, 'labels': labels}
-    else:
-        img_t, m_t = val_joint_transform(image, mask)
-        labels = process_mask(m_t)
-        return {'pixel_values': img_t, 'labels': labels}
 
 
 # 한 epoch 학습
