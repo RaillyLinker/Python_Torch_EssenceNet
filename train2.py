@@ -268,7 +268,7 @@ def main():
         train_ds = load_from_disk(TRAIN_DISK_PATH)
 
     if not os.path.exists(VAL_DISK_PATH):
-        val_ds = process_in_chunks(val_raw, chunk_size=200, mode='val', save_dir=VAL_DISK_PATH, num_workers=num_workers)
+        val_ds = process_in_chunks(val_raw, chunk_size=500, mode='val', save_dir=VAL_DISK_PATH, num_workers=num_workers)
     else:
         val_ds = load_from_disk(VAL_DISK_PATH)
 
