@@ -29,39 +29,41 @@ class EssenceNet(nn.Module):
     def __init__(self):
         super().__init__()
 
-        # todo conv 채널 변경, 해상도를 2 배수(320)로 해보기(단계가 많아지므로 residual 을 없애고, 특징맵 해상도 반토막으로 시작하기)
+        # todo conv 채널 변경
         self.feats_convs = nn.ModuleList([
-            _double_conv_block(3, 32, 16, 3, 1, 1, 0.0, 1),  # 243x243 -> 243x243
-            _double_conv_block(16, 64, 32, 3, 3, 0, 0.0, 1),  # 243x243 -> 81x81
-            _double_conv_block(32, 128, 64, 3, 3, 0, 0.15, 5),  # 81x81 -> 27x27
-            _double_conv_block(64, 256, 128, 3, 3, 0, 0.20, 5),  # 27x27 -> 9x9
-            _double_conv_block(128, 512, 256, 3, 3, 0, 0.20, 3),  # 9x9 -> 3x3
-            _double_conv_block(256, 1024, 512, 3, 1, 0, 0.0, 1)  # 3x3 -> 1x1
+            _double_conv_block(3, 128, 64, 3, 2, 1, 0.0, 1),  # 320x320 -> 160x160
+            _double_conv_block(64, 128, 64, 3, 2, 1, 0.05, 3),  # 160x160 -> 80x80
+            _double_conv_block(64, 256, 128, 3, 2, 1, 0.10, 3),  # 80x80 -> 40x40
+            _double_conv_block(128, 256, 128, 3, 2, 1, 0.15, 5),  # 40x40 -> 20x20
+            _double_conv_block(128, 512, 256, 3, 2, 1, 0.20, 5),  # 20x20 -> 10x10
+            _double_conv_block(256, 512, 256, 3, 2, 1, 0.20, 3),  # 10x10 -> 5x5
+            _double_conv_block(256, 1024, 512, 3, 2, 1, 0.15, 3),  # 5x5 -> 3x3
+            _double_conv_block(512, 1024, 512, 3, 1, 0, 0.0, 1)  # 3x3 -> 1x1
         ])
 
-        # feats_convs 를 기반으로 projection 레이어 자동 생성
-        self.projections = nn.ModuleList()
-        prev_out_ch = 3  # 입력 이미지 채널 (RGB)
-        for conv_block in self.feats_convs:
-            conv_layers = [layer for layer in conv_block.modules() if isinstance(layer, nn.Conv2d)]
-            last_conv = conv_layers[-1]
-            out_ch = last_conv.out_channels
-
-            self.projections.append(
-                nn.Sequential(
-                    nn.Conv2d(prev_out_ch, (prev_out_ch + out_ch) // 2, kernel_size=1, stride=1, bias=False),
-                    nn.BatchNorm2d((prev_out_ch + out_ch) // 2),
-                    nn.SiLU(),
-
-                    nn.Conv2d((prev_out_ch + out_ch) // 2, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
-                    nn.BatchNorm2d(out_ch),
-                    nn.SiLU(),
-
-                    nn.Dropout2d(0.2)
-                )
-            )
-
-            prev_out_ch = out_ch
+        # # feats_convs 를 기반으로 projection 레이어 자동 생성
+        # self.projections = nn.ModuleList()
+        # prev_out_ch = 3  # 입력 이미지 채널 (RGB)
+        # for conv_block in self.feats_convs:
+        #     conv_layers = [layer for layer in conv_block.modules() if isinstance(layer, nn.Conv2d)]
+        #     last_conv = conv_layers[-1]
+        #     out_ch = last_conv.out_channels
+        #
+        #     self.projections.append(
+        #         nn.Sequential(
+        #             nn.Conv2d(prev_out_ch, (prev_out_ch + out_ch) // 2, kernel_size=1, stride=1, bias=False),
+        #             nn.BatchNorm2d((prev_out_ch + out_ch) // 2),
+        #             nn.SiLU(),
+        #
+        #             nn.Conv2d((prev_out_ch + out_ch) // 2, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
+        #             nn.BatchNorm2d(out_ch),
+        #             nn.SiLU(),
+        #
+        #             nn.Dropout2d(0.2)
+        #         )
+        #     )
+        #
+        #     prev_out_ch = out_ch
 
     def forward(self, x):
         assert x.shape[1] == 3, "Input tensor must have 3 channels (RGB)."
@@ -69,21 +71,23 @@ class EssenceNet(nn.Module):
 
         feat = x
         for idx, conv in enumerate(self.feats_convs):
-            # Residual 용 특징 저장
-            identity = feat
+            # # Residual 용 특징 저장
+            # identity = feat
 
             # Conv 연산
             feat = conv(feat)
 
-            # Residual 해상도 맞추기
-            if not isinstance(self.projections[idx], nn.Identity):
-                identity = F.interpolate(identity, size=feat.shape[2:], mode='area')
+            # # Residual 해상도 맞추기
+            # if not isinstance(self.projections[idx], nn.Identity):
+            #     identity = F.interpolate(identity, size=feat.shape[2:], mode='area')
+            #
+            # # Residual 채널 맞추기
+            # projected = self.projections[idx](identity)
+            #
+            # # Residual 합치기
+            # feat = feat + projected
 
-            # Residual 채널 맞추기
-            projected = self.projections[idx](identity)
-
-            # Residual 합치기
-            feat = feat + projected
+            # 특징 저장
             feats_list.append(feat)
 
         return feats_list
@@ -98,7 +102,7 @@ class EssenceNetSegmenter(nn.Module):
         self.backbone = EssenceNet()
 
         # 백본 특징맵 피라미드 채널 수
-        self.feat_channels = [16, 32, 64, 128, 256, 512]
+        self.feat_channels = [64, 64, 128, 128, 256, 256, 512, 512]
         self.encoder_input = sum(self.feat_channels)
 
         # 분류기 헤드

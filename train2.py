@@ -32,11 +32,11 @@ if torch.cuda.is_available():
 # paths & constants
 PRETRAINED_MODEL_PATH = None
 NUM_CLASSES = 150  # ADE20K number of classes
-TRAIN_DISK_PATH = "C:/dataset/ade20k/train"
-VAL_DISK_PATH = "C:/dataset/ade20k/val"
+TRAIN_DISK_PATH = "C:/dataset/ade20k_320/train"
+VAL_DISK_PATH = "C:/dataset/ade20k_320/val"
 LOG_DIR = "runs/ade_exp"
 CHECKPOINT_DIR = "checkpoints"
-INPUT_SIZE = 243
+INPUT_SIZE = 320
 
 
 def apply_ade_transform_batch(batch, mode: str):
