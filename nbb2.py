@@ -5,33 +5,24 @@ from dropblock import DropBlock2D
 
 
 # todo : 1x1 conv 깊이 변경
-class ResidualDoubleConvBlock(nn.Module):
-    def __init__(self, in_ch, mid_ch, out_ch, ks, stride, padding, drop_prob, block_size):
-        super().__init__()
-        self.conv_seq = nn.Sequential(
-            nn.Conv2d(in_ch, mid_ch, kernel_size=ks, stride=stride, padding=padding, bias=False),
-            nn.BatchNorm2d(mid_ch),
-            nn.SiLU(),
-            nn.Conv2d(mid_ch, mid_ch, kernel_size=1, stride=1, padding=0, bias=False),
-            nn.BatchNorm2d(mid_ch),
-            nn.SiLU(),
-            DropBlock2D(drop_prob=drop_prob, block_size=block_size),
-            nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
-            nn.BatchNorm2d(out_ch),
-        )
-        self.proj = (
-            nn.Identity() if in_ch == out_ch and stride == 1 else nn.Sequential(
-                nn.Conv2d(in_ch, out_ch, kernel_size=1, stride=stride, padding=0, bias=False),
-                nn.BatchNorm2d(out_ch),
-            )
-        )
-        self.act = nn.SiLU()
+def _double_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, dp, bs):
+    return nn.Sequential(
+        # 평면당 형태를 파악
+        nn.Conv2d(in_ch, mid_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
+        nn.BatchNorm2d(mid_ch),
+        nn.SiLU(),
 
-    def forward(self, x):
-        skip = self.proj(x)
-        x = self.act(x)
-        out = self.conv_seq(x)
-        return out + skip
+        # 픽셀별 의미 추출(희소한 특징 압축)
+        nn.Conv2d(mid_ch, (mid_ch + out_ch) // 2, kernel_size=1, stride=1, padding=0, bias=False),
+        nn.BatchNorm2d((mid_ch + out_ch) // 2),
+        nn.SiLU(),
+
+        nn.Conv2d((mid_ch + out_ch) // 2, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
+        nn.BatchNorm2d(out_ch),
+        nn.SiLU(),
+
+        DropBlock2D(drop_prob=dp, block_size=bs)
+    )
 
 
 # (EssenceNet 백본)
@@ -39,25 +30,60 @@ class EssenceNet(nn.Module):
     def __init__(self):
         super().__init__()
 
-        # todo conv 채널 변경
+        # todo conv 채널 변경, 해상도를 2 배수(320)로 해보기
         self.feats_convs = nn.ModuleList([
-            ResidualDoubleConvBlock(3, 32, 16, 3, 1, 1, 0.0, 1),  # 243x243 -> 243x243
-            ResidualDoubleConvBlock(16, 64, 32, 3, 3, 0, 0.0, 1),  # 243x243 -> 81x81
-            ResidualDoubleConvBlock(32, 128, 64, 3, 3, 0, 0.15, 5),  # 81x81 -> 27x27
-            ResidualDoubleConvBlock(64, 256, 128, 3, 3, 0, 0.20, 5),  # 27x27 -> 9x9
-            ResidualDoubleConvBlock(128, 512, 256, 3, 3, 0, 0.20, 3),  # 9x9 -> 3x3
-            ResidualDoubleConvBlock(256, 1024, 512, 3, 1, 0, 0.0, 1)  # 3x3 -> 1x1
+            _double_conv_block(3, 32, 16, 3, 1, 1, 0.0, 1),  # 243x243 -> 243x243
+            _double_conv_block(16, 64, 32, 3, 3, 0, 0.0, 1),  # 243x243 -> 81x81
+            _double_conv_block(32, 128, 64, 3, 3, 0, 0.15, 5),  # 81x81 -> 27x27
+            _double_conv_block(64, 256, 128, 3, 3, 0, 0.20, 5),  # 27x27 -> 9x9
+            _double_conv_block(128, 512, 256, 3, 3, 0, 0.20, 3),  # 9x9 -> 3x3
+            _double_conv_block(256, 1024, 512, 3, 1, 0, 0.0, 1)  # 3x3 -> 1x1
         ])
+
+        # feats_convs를 기반으로 projection 레이어 자동 생성
+        self.projections = nn.ModuleList()
+        prev_out_ch = 3  # 입력 이미지 채널 (RGB)
+        for conv_block in self.feats_convs:
+            conv_layers = [layer for layer in conv_block.modules() if isinstance(layer, nn.Conv2d)]
+            last_conv = conv_layers[-1]
+            out_ch = last_conv.out_channels
+
+            if prev_out_ch == out_ch:
+                self.projections.append(nn.Identity())
+            else:
+                self.projections.append(
+                    nn.Sequential(
+                        nn.Conv2d(prev_out_ch, (prev_out_ch + out_ch) // 2, kernel_size=1, stride=1, bias=False),
+                        nn.BatchNorm2d((prev_out_ch + out_ch) // 2),
+                        nn.SiLU(),
+
+                        nn.Conv2d((prev_out_ch + out_ch) // 2, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
+                        nn.BatchNorm2d(out_ch),
+                        nn.SiLU(),
+
+                        nn.Dropout2d(0.2)
+                    )
+                )
+
+            prev_out_ch = out_ch
 
     def forward(self, x):
         assert x.shape[1] == 3, "Input tensor must have 3 channels (RGB)."
         feats_list = []
 
         feat = x
-        for feats_conv in self.feats_convs:
-            res_out = feats_conv(feat)
-            feats_list.append(res_out)
-            feat = res_out
+        for idx, conv in enumerate(self.feats_convs):
+            identity = feat
+            feat = conv(feat)
+
+            if not isinstance(self.projections[idx], nn.Identity):
+                target_size = feat.shape[2:]
+                identity = F.interpolate(identity, size=target_size, mode='area')
+
+            projected = self.projections[idx](identity)
+            feat = feat + projected
+            feats_list.append(feat)
+
         return feats_list
 
 
@@ -73,14 +99,14 @@ class EssenceNetSegmenter(nn.Module):
 
         # 분류기 헤드
         # todo : 1x1 conv 깊이 변경
-        hidden_ch = self.encoder_input // 2
         self.classifier_head = nn.Sequential(
-            nn.Conv2d(self.encoder_input, hidden_ch, kernel_size=1, bias=False),
-            nn.BatchNorm2d(hidden_ch),
+            nn.Conv2d(self.encoder_input, (self.encoder_input + num_classes) // 2, kernel_size=1, bias=False),
+            nn.BatchNorm2d((self.encoder_input + num_classes) // 2),
             nn.SiLU(),
+
             nn.Dropout2d(0.2),
 
-            nn.Conv2d(hidden_ch, num_classes, kernel_size=1)
+            nn.Conv2d((self.encoder_input + num_classes) // 2, num_classes, kernel_size=1)
         )
 
     def forward(self, x):
