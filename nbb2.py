@@ -5,26 +5,33 @@ from dropblock import DropBlock2D
 
 
 # todo : 1x1 conv 깊이 변경
-def _double_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, dp, bs):
-    return nn.Sequential(
-        # 평면당 형태를 파악
-        nn.Conv2d(in_ch, mid_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
-        nn.BatchNorm2d(mid_ch),
-        nn.SiLU(),
+class ResidualDoubleConvBlock(nn.Module):
+    def __init__(self, in_ch, mid_ch, out_ch, ks, stride, padding, drop_prob, block_size):
+        super().__init__()
+        self.conv_seq = nn.Sequential(
+            nn.Conv2d(in_ch, mid_ch, kernel_size=ks, stride=stride, padding=padding, bias=False),
+            nn.BatchNorm2d(mid_ch),
+            nn.SiLU(),
+            nn.Conv2d(mid_ch, mid_ch, kernel_size=1, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(mid_ch),
+            nn.SiLU(),
+            DropBlock2D(drop_prob=drop_prob, block_size=block_size),
+            nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(out_ch),
+        )
+        self.proj = (
+            nn.Identity() if in_ch == out_ch and stride == 1 else nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, kernel_size=1, stride=stride, padding=0, bias=False),
+                nn.BatchNorm2d(out_ch),
+            )
+        )
+        self.act = nn.SiLU()
 
-        DropBlock2D(drop_prob=dp, block_size=bs),
-
-        # 픽셀별 의미 추출
-        nn.Conv2d(mid_ch, mid_ch, kernel_size=1, stride=1, padding=0, bias=False),
-        nn.BatchNorm2d(mid_ch),
-        nn.SiLU(),
-        nn.Dropout2d(0.2),
-
-        # 픽셀별 의미 추출
-        nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
-        nn.BatchNorm2d(out_ch),
-        nn.SiLU()
-    )
+    def forward(self, x):
+        skip = self.proj(x)
+        x = self.act(x)
+        out = self.conv_seq(x)
+        return out + skip
 
 
 # (EssenceNet 백본)
@@ -34,12 +41,12 @@ class EssenceNet(nn.Module):
 
         # todo conv 채널 변경
         self.feats_convs = nn.ModuleList([
-            _double_conv_block(3, 32, 16, 3, 1, 1, 0.0, 1),  # 243x243 -> 243x243
-            _double_conv_block(16, 64, 32, 3, 3, 0, 0.0, 1),  # 243x243 -> 81x81
-            _double_conv_block(32, 128, 64, 3, 3, 0, 0.15, 5),  # 81x81 -> 27x27
-            _double_conv_block(64, 256, 128, 3, 3, 0, 0.20, 5),  # 27x27 -> 9x9
-            _double_conv_block(128, 512, 256, 3, 3, 0, 0.20, 3),  # 9x9 -> 3x3
-            _double_conv_block(256, 1024, 512, 3, 1, 0, 0.0, 1)  # 3x3 -> 1x1
+            ResidualDoubleConvBlock(3, 32, 16, 3, 1, 1, 0.0, 1),  # 243x243 -> 243x243
+            ResidualDoubleConvBlock(16, 64, 32, 3, 3, 0, 0.0, 1),  # 243x243 -> 81x81
+            ResidualDoubleConvBlock(32, 128, 64, 3, 3, 0, 0.15, 5),  # 81x81 -> 27x27
+            ResidualDoubleConvBlock(64, 256, 128, 3, 3, 0, 0.20, 5),  # 27x27 -> 9x9
+            ResidualDoubleConvBlock(128, 512, 256, 3, 3, 0, 0.20, 3),  # 9x9 -> 3x3
+            ResidualDoubleConvBlock(256, 1024, 512, 3, 1, 0, 0.0, 1)  # 3x3 -> 1x1
         ])
 
     def forward(self, x):
@@ -47,10 +54,10 @@ class EssenceNet(nn.Module):
         feats_list = []
 
         feat = x
-        for conv in self.feats_convs:
-            feat = conv(feat)
-            feats_list.append(feat)
-
+        for feats_conv in self.feats_convs:
+            res_out = feats_conv(feat)
+            feats_list.append(res_out)
+            feat = res_out
         return feats_list
 
 
