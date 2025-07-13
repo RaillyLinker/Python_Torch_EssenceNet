@@ -25,6 +25,7 @@ def _double_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, dp, bs):
     )
 
 
+# todo 백본을 굵게 할지, 헤드를 깊게 할지
 # (EssenceNet 백본)
 class EssenceNet(nn.Module):
     def __init__(self):
@@ -32,14 +33,14 @@ class EssenceNet(nn.Module):
 
         # todo conv 채널 변경
         self.feats_convs = nn.ModuleList([
-            _double_conv_block(3, 128, 64, 3, 2, 1, 0.0, 1),  # 320x320 -> 160x160
-            _double_conv_block(64, 256, 64, 3, 2, 1, 0.05, 3),  # 160x160 -> 80x80
-            _double_conv_block(64, 256, 128, 3, 2, 1, 0.10, 3),  # 80x80 -> 40x40
-            _double_conv_block(128, 512, 128, 3, 2, 1, 0.15, 5),  # 40x40 -> 20x20
-            _double_conv_block(128, 512, 256, 3, 2, 1, 0.20, 5),  # 20x20 -> 10x10
-            _double_conv_block(256, 1024, 256, 3, 2, 1, 0.20, 3),  # 10x10 -> 5x5
-            _double_conv_block(256, 1024, 512, 3, 2, 1, 0.15, 3),  # 5x5 -> 3x3
-            _double_conv_block(512, 2048, 512, 3, 1, 0, 0.0, 1)  # 3x3 -> 1x1
+            _double_conv_block(3, 64, 32, 3, 2, 1, 0.0, 1),  # 320x320 -> 160x160
+            _double_conv_block(32, 128, 32, 3, 2, 1, 0.05, 3),  # 160x160 -> 80x80
+            _double_conv_block(32, 128, 64, 3, 2, 1, 0.10, 3),  # 80x80 -> 40x40
+            _double_conv_block(64, 256, 64, 3, 2, 1, 0.15, 5),  # 40x40 -> 20x20
+            _double_conv_block(64, 256, 128, 3, 2, 1, 0.20, 5),  # 20x20 -> 10x10
+            _double_conv_block(128, 512, 128, 3, 2, 1, 0.20, 3),  # 10x10 -> 5x5
+            _double_conv_block(128, 512, 256, 3, 2, 1, 0.15, 3),  # 5x5 -> 3x3
+            _double_conv_block(256, 1024, 256, 3, 1, 0, 0.0, 1)  # 3x3 -> 1x1
         ])
 
         # feats_convs 를 기반으로 projection 레이어 자동 생성
@@ -103,13 +104,21 @@ class EssenceNetSegmenter(nn.Module):
         self.backbone = EssenceNet()
 
         # 백본 특징맵 피라미드 채널 수
-        self.feat_channels = [64, 64, 128, 128, 256, 256, 512, 512]
+        self.feat_channels = [32, 32, 64, 64, 128, 128, 256, 256]
         self.encoder_input = sum(self.feat_channels)
 
         # 분류기 헤드
         hidden_dim = (self.encoder_input + num_classes) // 2
         self.classifier_head = nn.Sequential(
             nn.Conv2d(self.encoder_input, hidden_dim, kernel_size=1, bias=False),
+            nn.BatchNorm2d(hidden_dim),
+            nn.SiLU(),
+
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=1, bias=False),
+            nn.BatchNorm2d(hidden_dim),
+            nn.SiLU(),
+
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=1, bias=False),
             nn.BatchNorm2d(hidden_dim),
             nn.SiLU(),
 
