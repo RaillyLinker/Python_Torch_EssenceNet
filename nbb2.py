@@ -4,7 +4,17 @@ import torch.nn.functional as F
 from dropblock import DropBlock2D
 
 
-# todo : conv 블록을 깊게할지, conv 채널을 크게 할지, head 를 깊게 할지
+def _single_conv_block(in_ch, out_ch, ks, strd, pdd, dp, bs):
+    return nn.Sequential(
+        # 평면당 형태를 파악
+        nn.Conv2d(in_ch, out_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
+        nn.BatchNorm2d(out_ch),
+        nn.SiLU(),
+
+        DropBlock2D(drop_prob=dp, block_size=bs)
+    )
+
+
 def _double_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, dp, bs):
     return nn.Sequential(
         # 평면당 형태를 파악
@@ -31,7 +41,7 @@ class EssenceNet(nn.Module):
         super().__init__()
 
         self.feats_convs = nn.ModuleList([
-            _double_conv_block(3, 48, 24, 3, 2, 1, 0.0, 1),  # 320x320 -> 160x160
+            _single_conv_block(3, 24, 3, 2, 1, 0.0, 1),  # 320x320 -> 160x160
             _double_conv_block(24, 64, 32, 3, 2, 1, 0.05, 3),  # 160x160 -> 80x80
             _double_conv_block(32, 96, 48, 3, 2, 1, 0.10, 3),  # 80x80 -> 40x40
             _double_conv_block(48, 128, 64, 3, 2, 1, 0.15, 5),  # 40x40 -> 20x20
