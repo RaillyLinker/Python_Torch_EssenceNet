@@ -122,6 +122,14 @@ class EssenceNetSegmenter(nn.Module):
             nn.BatchNorm2d(hidden_dim),
             nn.SiLU(),
 
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=1, bias=False),
+            nn.BatchNorm2d(hidden_dim),
+            nn.SiLU(),
+
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=1, bias=False),
+            nn.BatchNorm2d(hidden_dim),
+            nn.SiLU(),
+
             nn.Dropout2d(0.2),
 
             nn.Conv2d(hidden_dim, num_classes, kernel_size=1)
