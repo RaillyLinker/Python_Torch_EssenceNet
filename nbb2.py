@@ -41,6 +41,23 @@ class EssenceNet(nn.Module):
             _double_conv_block(512, 2048, 512, 3, 1, 0, 0.0, 1)  # 3x3 -> 1x1
         ])
 
+        # 특징맵 피라미드 채널 수
+        encoder_input = sum([conv[-4].out_channels for conv in self.feats_convs])
+
+        # 인코더 헤드
+        self.encoder_output = encoder_input // 2
+        self.encoder_head = nn.Sequential(
+            nn.Conv2d(encoder_input, self.encoder_output, kernel_size=1, bias=False),
+            nn.BatchNorm2d(self.encoder_output),
+            nn.SiLU(),
+
+            nn.Conv2d(self.encoder_output, self.encoder_output, kernel_size=1, bias=False),
+            nn.BatchNorm2d(self.encoder_output),
+            nn.SiLU(),
+
+            nn.Dropout2d(0.2)
+        )
+
     def forward(self, x):
         assert x.shape[1] == 3, "Input tensor must have 3 channels (RGB)."
         feats_list = []
@@ -53,7 +70,13 @@ class EssenceNet(nn.Module):
             # 특징 저장
             feats_list.append(feat)
 
-        return feats_list
+        # 특징맵 피라미드들을 최고 해상도 기준으로 합치기
+        concat_feats = torch.cat(
+            [F.interpolate(f, size=feats_list[0].shape[2:], mode='nearest') for f in feats_list],
+            dim=1
+        )
+
+        return self.encoder_head(concat_feats)
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -64,24 +87,12 @@ class EssenceNetSegmenter(nn.Module):
         # conv 백본 모델
         self.backbone = EssenceNet()
 
-        # 백본 특징맵 피라미드 채널 수
-        self.feat_channels = [64, 64, 128, 128, 256, 256, 512, 512]
-        self.encoder_input = sum(self.feat_channels)
+        # 백본 출력 채널
+        backbone_output_ch = self.backbone.encoder_output
 
         # 분류기 헤드
-        hidden_dim = self.encoder_input // 2
         self.classifier_head = nn.Sequential(
-            nn.Conv2d(self.encoder_input, hidden_dim, kernel_size=1, bias=False),
-            nn.BatchNorm2d(hidden_dim),
-            nn.SiLU(),
-
-            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=1, bias=False),
-            nn.BatchNorm2d(hidden_dim),
-            nn.SiLU(),
-
-            nn.Dropout2d(0.2),
-
-            nn.Conv2d(hidden_dim, num_classes, kernel_size=1, bias=False),
+            nn.Conv2d(backbone_output_ch, num_classes, kernel_size=1, bias=False),
             nn.BatchNorm2d(num_classes),
             nn.SiLU(),
 
@@ -92,10 +103,7 @@ class EssenceNetSegmenter(nn.Module):
         # 백본 특징맵 피라미드 추출
         feats = self.backbone(x)
 
-        # 특징맵 피라미드들을 최고 해상도 기준으로 합치기
-        concat_feats = torch.cat([F.interpolate(f, size=feats[0].shape[2:], mode='nearest') for f in feats], dim=1)
-
         # 픽셀별 분류 헤드 적용
-        logits = self.classifier_head(concat_feats)
+        logits = self.classifier_head(feats)
 
         return logits
