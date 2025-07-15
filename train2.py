@@ -16,8 +16,29 @@ from PIL import Image
 from tqdm import tqdm
 import math
 import shutil
+import matplotlib.pyplot as plt  # 맨 위에 import 추가
 
 from nbb2 import EssenceNetSegmenter
+import time  # 추가
+from sklearn.metrics import confusion_matrix  # mIoU 계산에 필요
+
+
+# === mIoU 계산 함수 추가 ===
+def calculate_miou(y_pred, y_true, num_classes, ignore_index=255, return_iou=False):
+    y_pred = y_pred.view(-1)
+    y_true = y_true.view(-1)
+    mask = y_true != ignore_index
+    y_pred = y_pred[mask]
+    y_true = y_true[mask]
+
+    conf_matrix = confusion_matrix(y_true.cpu().numpy(), y_pred.cpu().numpy(), labels=list(range(num_classes)))
+    intersection = np.diag(conf_matrix)
+    union = conf_matrix.sum(1) + conf_matrix.sum(0) - intersection
+    iou = np.where(union > 0, intersection / (union + 1e-10), np.nan)
+    miou = np.nanmean(iou) if np.any(~np.isnan(iou)) else 0.0
+
+    return (miou, iou) if return_iou else miou
+
 
 # reproducibility seed
 SEED = 42
@@ -155,6 +176,7 @@ def train_epoch(model, loader, optimizer, device, scaler, criterion_fn, use_amp,
     running_loss = 0
     correct_pixels = 0
     total_pixels = 0
+    start_time = time.time()  # 시간 측정 시작
 
     for batch_idx, batch in enumerate(tqdm(loader, desc='Train', leave=False)):
         imgs = batch['pixel_values'].to(device)
@@ -196,25 +218,39 @@ def train_epoch(model, loader, optimizer, device, scaler, criterion_fn, use_amp,
         total_pixels += valid_mask.sum().item()
 
     # --- epoch 단위 평균 loss & accuracy ---
+    end_time = time.time()
+    elapsed = end_time - start_time
+    samples_per_sec = len(loader.dataset) / elapsed
+
     avg_loss = running_loss / len(loader.dataset)
     train_acc = correct_pixels / total_pixels if total_pixels > 0 else 0.0
 
     # --- 화면 출력 및 TensorBoard 기록 ---
     print(f"Train Loss: {avg_loss:.4f} | Train Acc: {train_acc * 100:.2f}%")
+    print(f"Epoch Time: {elapsed:.2f}s | Samples/sec: {samples_per_sec:.2f}")
+
     writer.add_scalar('Loss/train', avg_loss, epoch)
     writer.add_scalar('Accuracy/train', train_acc, epoch)
+    writer.add_scalar('Speed/train_samples_per_sec', samples_per_sec, epoch)
+    writer.add_scalar('Time/train_epoch_time', elapsed, epoch)
 
     return avg_loss, train_acc
 
 
 # 한 epoch 검증
-def eval_epoch(model, loader, device, criterion_fn):
+def eval_epoch(model, loader, device, criterion_fn, writer=None, epoch=None):
     model.eval()
     running_loss = 0
     correct_pixels = 0
     total_pixels = 0
+    all_preds = []
+    all_targets = []
+
+    start_time = time.time()
+    first_batch_saved = False  # 첫 배치 저장 여부
+
     with torch.no_grad():
-        for batch in tqdm(loader, desc='Val', leave=False):
+        for batch_idx, batch in enumerate(tqdm(loader, desc='Val', leave=False)):
             imgs = batch['pixel_values'].to(device)
             masks = batch['labels'].to(device)
             outputs = model(imgs)
@@ -225,15 +261,62 @@ def eval_epoch(model, loader, device, criterion_fn):
             loss = criterion_fn(outputs, masks)
             running_loss += loss.item() * imgs.size(0)
 
-            # 🔍 정확도 계산
-            preds = torch.argmax(outputs, dim=1)  # 예측 클래스
-            mask_valid = masks != 255  # ignore index 마스크
-            correct_pixels += (preds[mask_valid] == masks[mask_valid]).sum().item()
-            total_pixels += mask_valid.sum().item()
+            preds = torch.argmax(outputs, dim=1)
+            valid_mask = masks != 255
+            correct_pixels += (preds[valid_mask] == masks[valid_mask]).sum().item()
+            total_pixels += valid_mask.sum().item()
+
+            all_preds.append(preds)
+            all_targets.append(masks)
+
+            # --- 첫 번째 배치에서 시각화 이미지 저장 ---
+            if (not first_batch_saved) and (epoch is not None):
+                rand_idx = random.randint(0, imgs.size(0) - 1)
+                img_np = imgs[rand_idx].detach().cpu().permute(1, 2, 0).numpy()
+                img_np = (img_np * [0.229, 0.224, 0.225]) + [0.485, 0.456, 0.406]  # De-normalize
+                img_np = np.clip(img_np, 0, 1)
+
+                pred_mask = preds[rand_idx].cpu().numpy()
+                gt_mask = masks[rand_idx].cpu().numpy()
+
+                fig, axs = plt.subplots(1, 3, figsize=(12, 4))
+                axs[0].imshow(img_np)
+                axs[0].set_title("Input Image")
+                axs[1].imshow(gt_mask, cmap="nipy_spectral", vmin=0, vmax=NUM_CLASSES - 1)
+                axs[1].set_title("Ground Truth")
+                axs[2].imshow(pred_mask, cmap="nipy_spectral", vmin=0, vmax=NUM_CLASSES - 1)
+                axs[2].set_title("Prediction")
+
+                for ax in axs:
+                    ax.axis("off")
+
+                vis_dir = os.path.join(LOG_DIR, "val_vis")
+                os.makedirs(vis_dir, exist_ok=True)
+                plt.tight_layout()
+                plt.savefig(os.path.join(vis_dir, f"epoch_{epoch:02d}_sample.png"))
+                plt.close()
+
+                first_batch_saved = True
+
+    end_time = time.time()
+    elapsed = end_time - start_time
+    samples_per_sec = len(loader.dataset) / elapsed
 
     avg_loss = running_loss / len(loader.dataset)
     accuracy = correct_pixels / total_pixels if total_pixels > 0 else 0.0
-    return avg_loss, accuracy
+    miou = calculate_miou(
+        torch.cat(all_preds).reshape(-1),
+        torch.cat(all_targets).reshape(-1),
+        NUM_CLASSES
+    )
+
+    print(f"Val Epoch Time: {elapsed:.2f}s | Samples/sec: {samples_per_sec:.2f}")
+
+    if writer is not None and epoch is not None:
+        writer.add_scalar('Speed/val_samples_per_sec', samples_per_sec, epoch)
+        writer.add_scalar('Time/val_epoch_time', elapsed, epoch)
+
+    return avg_loss, accuracy, miou
 
 
 # 메인 함수
@@ -302,19 +385,22 @@ def main():
     no_improve = 0
     max_epochs = 30
 
+    total_start_time = time.time()  # 전체 학습 시간 시작
+
     for epoch in range(1, max_epochs + 1):
         print(f"\nEpoch {epoch}/{max_epochs}")
         train_loss, train_acc = train_epoch(
             model, train_loader, optimizer, device, scaler,
             criterion_fn, use_amp, writer, epoch
         )
-        val_loss, val_acc = eval_epoch(model, val_loader, device, criterion_fn)
+        val_loss, val_acc, val_miou = eval_epoch(model, val_loader, device, criterion_fn, writer, epoch)
 
         # 기존 writer 기록은 train_epoch 내부에서 했으니 val만 추가
         writer.add_scalar('Loss/val', val_loss, epoch)
         writer.add_scalar('Accuracy/val', val_acc, epoch)
+        writer.add_scalar('mIoU/val', val_miou, epoch)
 
-        print(f"Val   Loss: {val_loss:.4f} | Val   Acc: {val_acc * 100:.2f}%")
+        print(f"Val   Loss: {val_loss:.4f} | Acc: {val_acc * 100:.2f}% | mIoU: {val_miou * 100:.2f}%")
 
         scheduler.step()
 
@@ -333,6 +419,10 @@ def main():
             if no_improve >= patience:
                 print(f"Early stopping at epoch {epoch}")
                 break
+
+    total_end_time = time.time()
+    total_elapsed = total_end_time - total_start_time
+    print(f"\nTotal Training Time: {total_elapsed:.2f} seconds ({total_elapsed / 60:.2f} minutes)")
 
     writer.close()
 
