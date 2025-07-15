@@ -6,7 +6,6 @@ from dropblock import DropBlock2D
 
 # todo : conv 블록을 깊게할지, conv 채널을 크게 할지, head 를 깊게 할지
 def _double_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, dp, bs):
-    hidden_dim = (mid_ch + out_ch) // 2
     return nn.Sequential(
         # 평면당 형태를 파악
         nn.Conv2d(in_ch, mid_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
@@ -14,15 +13,11 @@ def _double_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, dp, bs):
         nn.SiLU(),
 
         # 픽셀별 의미 추출(희소한 특징 압축)
-        nn.Conv2d(mid_ch, hidden_dim, kernel_size=1, stride=1, padding=0, bias=False),
-        nn.BatchNorm2d(hidden_dim),
+        nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
+        nn.BatchNorm2d(out_ch),
         nn.SiLU(),
 
-        # nn.Conv2d(hidden_dim, hidden_dim, kernel_size=1, stride=1, padding=0, bias=False),
-        # nn.BatchNorm2d(hidden_dim),
-        # nn.SiLU(),
-
-        nn.Conv2d(hidden_dim, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
+        nn.Conv2d(out_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
         nn.BatchNorm2d(out_ch),
         nn.SiLU(),
 
@@ -74,15 +69,23 @@ class EssenceNetSegmenter(nn.Module):
         self.encoder_input = sum(self.feat_channels)
 
         # 분류기 헤드
-        hidden_dim = (self.encoder_input + num_classes) // 2
+        hidden_dim = self.encoder_input // 2
         self.classifier_head = nn.Sequential(
             nn.Conv2d(self.encoder_input, hidden_dim, kernel_size=1, bias=False),
             nn.BatchNorm2d(hidden_dim),
             nn.SiLU(),
 
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=1, bias=False),
+            nn.BatchNorm2d(hidden_dim),
+            nn.SiLU(),
+
             nn.Dropout2d(0.2),
 
-            nn.Conv2d(hidden_dim, num_classes, kernel_size=1)
+            nn.Conv2d(hidden_dim, num_classes, kernel_size=1, bias=False),
+            nn.BatchNorm2d(num_classes),
+            nn.SiLU(),
+
+            nn.Conv2d(num_classes, num_classes, kernel_size=1)
         )
 
     def forward(self, x):
