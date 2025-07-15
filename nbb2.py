@@ -18,6 +18,10 @@ def _double_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, dp, bs):
         nn.BatchNorm2d(hidden_dim),
         nn.SiLU(),
 
+        # nn.Conv2d(hidden_dim, hidden_dim, kernel_size=1, stride=1, padding=0, bias=False),
+        # nn.BatchNorm2d(hidden_dim),
+        # nn.SiLU(),
+
         nn.Conv2d(hidden_dim, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
         nn.BatchNorm2d(out_ch),
         nn.SiLU(),
@@ -31,7 +35,6 @@ class EssenceNet(nn.Module):
     def __init__(self):
         super().__init__()
 
-        # todo : 모두 동일한 크기로 해보기(3x3 이 할 수 있는 최대 크기로 판단)
         self.feats_convs = nn.ModuleList([
             _double_conv_block(3, 128, 64, 3, 2, 1, 0.0, 1),  # 320x320 -> 160x160
             _double_conv_block(64, 256, 64, 3, 2, 1, 0.05, 3),  # 160x160 -> 80x80
@@ -43,52 +46,14 @@ class EssenceNet(nn.Module):
             _double_conv_block(512, 2048, 512, 3, 1, 0, 0.0, 1)  # 3x3 -> 1x1
         ])
 
-        # todo : residual 지워보기
-        # feats_convs 를 기반으로 projection 레이어 자동 생성
-        # self.projections = nn.ModuleList()
-        # prev_out_ch = 3  # 입력 이미지 채널 (RGB)
-        # for conv_block in self.feats_convs:
-        #     conv_layers = [layer for layer in conv_block.modules() if isinstance(layer, nn.Conv2d)]
-        #     last_conv = conv_layers[-1]
-        #     out_ch = last_conv.out_channels
-        #
-        #     self.projections.append(
-        #         nn.Sequential(
-        #             nn.Conv2d(prev_out_ch, (prev_out_ch + out_ch) // 2, kernel_size=1, stride=1, bias=False),
-        #             nn.BatchNorm2d((prev_out_ch + out_ch) // 2),
-        #             nn.SiLU(),
-        #
-        #             nn.Conv2d((prev_out_ch + out_ch) // 2, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
-        #             nn.BatchNorm2d(out_ch),
-        #             nn.SiLU(),
-        #
-        #             nn.Dropout2d(0.2)
-        #         )
-        #     )
-        #
-        #     prev_out_ch = out_ch
-
     def forward(self, x):
         assert x.shape[1] == 3, "Input tensor must have 3 channels (RGB)."
         feats_list = []
 
         feat = x
         for idx, conv in enumerate(self.feats_convs):
-            # # Residual 용 특징 저장
-            # identity = feat
-
             # Conv 연산
             feat = conv(feat)
-
-            # # Residual 해상도 맞추기
-            # if not isinstance(self.projections[idx], nn.Identity):
-            #     identity = F.interpolate(identity, size=feat.shape[2:], mode='area')
-            #
-            # # Residual 채널 맞추기
-            # projected = self.projections[idx](identity)
-            #
-            # # Residual 합치기
-            # feat = feat + projected
 
             # 특징 저장
             feats_list.append(feat)
