@@ -34,6 +34,7 @@ class EssenceNet(nn.Module):
     def __init__(self):
         super().__init__()
 
+        # todo : PE 를 반영해보기
         self.feats_convs = nn.ModuleList([
             _single_conv_block(3, 32, 3, 2, 1),  # 320x320 -> 160x160
             _double_conv_block(32, 96, 48, 3, 2, 1, 0.05, 3),  # 160x160 -> 80x80
@@ -45,7 +46,7 @@ class EssenceNet(nn.Module):
             _double_conv_block(256, 768, 384, 3, 1, 0, 0.0, 1)  # 3x3 -> 1x1
         ])
 
-        # todo : Residual 처음부터 이전까지 누적 플러스 방식 적용해보기 or 특징이 아니라 입력 이미지만 한번에 축소해놓고 잔차 더하기
+        # todo : 특징이 아니라 입력 이미지만 한번에 축소해놓고 잔차 더하기
         # feats_convs 를 기반으로 projection 레이어 자동 생성
         self.projections = nn.ModuleList()
         prev_out_ch = 3  # 입력 이미지 채널 (RGB)
@@ -56,11 +57,7 @@ class EssenceNet(nn.Module):
 
             self.projections.append(
                 nn.Sequential(
-                    nn.Conv2d(prev_out_ch, (prev_out_ch + out_ch) // 2, kernel_size=1, stride=1, bias=False),
-                    nn.BatchNorm2d((prev_out_ch + out_ch) // 2),
-                    nn.SiLU(),
-
-                    nn.Conv2d((prev_out_ch + out_ch) // 2, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
+                    nn.Conv2d(prev_out_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
                     nn.BatchNorm2d(out_ch),
                     nn.SiLU()
                 )
@@ -103,8 +100,7 @@ class EssenceNet(nn.Module):
             feat = conv(feat)
 
             # Residual 해상도 맞추기
-            if not isinstance(self.projections[idx], nn.Identity):
-                identity = F.interpolate(identity, size=feat.shape[2:], mode='area')
+            identity = F.interpolate(identity, size=feat.shape[2:], mode='area')
 
             # Residual 채널 맞추기
             projected = self.projections[idx](identity)
