@@ -37,8 +37,8 @@ class EssenceNet(nn.Module):
         super().__init__()
 
         self.feats_convs = nn.ModuleList([
-            _single_conv_block(3, 24, 3, 2, 1, 0.0, 1),  # 320x320 -> 160x160
-            _double_conv_block(24, 128, 64, 3, 2, 1, 0.05, 3),  # 160x160 -> 80x80
+            _single_conv_block(3, 48, 3, 2, 1, 0.0, 1),  # 320x320 -> 160x160
+            _double_conv_block(48, 128, 64, 3, 2, 1, 0.05, 3),  # 160x160 -> 80x80
             _double_conv_block(64, 192, 96, 3, 2, 1, 0.10, 3),  # 80x80 -> 40x40
             _double_conv_block(96, 256, 128, 3, 2, 1, 0.15, 5),  # 40x40 -> 20x20
             _double_conv_block(128, 384, 192, 3, 2, 1, 0.20, 5),  # 20x20 -> 10x10
