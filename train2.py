@@ -6,8 +6,7 @@ import torch.optim as optim
 import torchvision.transforms.functional as TF
 import torch.nn.functional as F
 from datasets import load_dataset, load_from_disk, concatenate_datasets
-from torch.amp import GradScaler
-from torch.amp import autocast
+from torch.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
@@ -19,9 +18,9 @@ import math
 import shutil
 import matplotlib.pyplot as plt
 import time
-from sklearn.metrics import confusion_matrix
 from nbb2 import EssenceNetSegmenter
 
+# Paths and hyperparameters
 PRETRAINED_MODEL_PATH = None
 NUM_CLASSES = 150  # ADE20K number of classes
 TRAIN_DISK_PATH = "C:/dataset/ade20k_320/train"
@@ -30,6 +29,14 @@ LOG_DIR = "runs/ade_exp"
 CHECKPOINT_DIR = "checkpoints"
 INPUT_SIZE = 320
 SEED = 42
+BATCH_SIZE = 8
+NUM_WORKERS = 4
+LEARNING_RATE = 1e-4
+WEIGHT_DECAY = 1e-6
+MAX_EPOCHS = 30
+PATIENCE = 5
+
+# reproducibility
 torch.manual_seed(SEED)
 random.seed(SEED)
 np.random.seed(SEED)
@@ -39,94 +46,66 @@ if torch.cuda.is_available():
     torch.backends.cudnn.benchmark = False
 
 
-def calculate_miou(y_pred, y_true, num_classes, ignore_index=255, return_iou=False):
-    y_pred = y_pred.view(-1)
-    y_true = y_true.view(-1)
-    mask = y_true != ignore_index
-    y_pred = y_pred[mask]
-    y_true = y_true[mask]
+# mIoU calculator no longer uses confusion matrix on full dataset
 
-    conf_matrix = confusion_matrix(y_true.cpu().numpy(), y_pred.cpu().numpy(), labels=list(range(num_classes)))
-    intersection = np.diag(conf_matrix)
-    union = conf_matrix.sum(1) + conf_matrix.sum(0) - intersection
+def calculate_miou_stats(intersection: np.ndarray, union: np.ndarray):
     iou = np.where(union > 0, intersection / (union + 1e-10), np.nan)
     miou = np.nanmean(iou) if np.any(~np.isnan(iou)) else 0.0
+    return miou, iou
 
-    return (miou, iou) if return_iou else miou
 
+# Transformations
 
 def apply_ade_transform_batch(batch, mode: str):
     images, labels = [], []
     for img, mask in zip(batch["image"], batch["annotation"]):
-        img_t, m_t = (joint_transform if mode == 'train' else val_joint_transform)(img, mask)
-        m_arr = (np.array(m_t, dtype=np.int64)
-                 if isinstance(m_t, Image.Image)
-                 else (m_t.numpy().astype(np.int64) if torch.is_tensor(m_t)
-                       else np.array(m_t, dtype=np.int64)))
+        img_t, m_t = (train_transform if mode == 'train' else val_transform)(img, mask)
+        m_arr = np.array(m_t, dtype=np.int64)
         if m_arr.ndim == 3:
             m_arr = m_arr[0]
         m_arr = np.where((m_arr >= 1) & (m_arr <= NUM_CLASSES), m_arr - 1, 255)
-        labels.append(torch.tensor(m_arr, dtype=torch.long))
         images.append(img_t)
-
-    images = torch.stack(images)
-    labels = torch.stack(labels)
-    return {'pixel_values': images, 'labels': labels}
+        labels.append(torch.tensor(m_arr, dtype=torch.long))
+    return {'pixel_values': torch.stack(images), 'labels': torch.stack(labels)}
 
 
-def process_in_chunks(dataset, chunk_size, mode, save_dir, num_workers):
+def process_in_chunks(ds, chunk_size, mode, save_dir):
     os.makedirs(save_dir, exist_ok=True)
-    total_len = len(dataset)
-    num_chunks = math.ceil(total_len / chunk_size)
-    print(f"Total samples: {total_len}, chunks: {num_chunks}")
-
-    chunk_paths = []
-
-    for i in range(num_chunks):
-        start = i * chunk_size
-        end = min((i + 1) * chunk_size, total_len)
-        chunk = dataset.select(range(start, end))
-
-        print(f"Processing chunk {i + 1}/{num_chunks} ({start}~{end})...")
-
-        chunk_path = os.path.join(save_dir, f"{mode}_chunk_{i}")
-        if os.path.exists(chunk_path):
-            print(f"Chunk {i + 1} already exists, skipping.")
-            chunk_paths.append(chunk_path)
+    total = len(ds)
+    chunks = math.ceil(total / chunk_size)
+    paths = []
+    for i in range(chunks):
+        start, end = i * chunk_size, min((i + 1) * chunk_size, total)
+        out_path = os.path.join(save_dir, f"{mode}_chunk_{i}")
+        if os.path.exists(out_path):
+            paths.append(out_path)
             continue
-
-        processed = chunk.map(
-            lambda x: apply_ade_transform_batch(x, mode),
-            batched=True,
-            batch_size=8,
-            num_proc=num_workers
-        )
-
-        processed.save_to_disk(chunk_path)
-        chunk_paths.append(chunk_path)
-
-    all_chunks = [load_from_disk(p) for p in chunk_paths]
-    full_dataset = concatenate_datasets(all_chunks)
-    full_dataset.save_to_disk(save_dir)
-
-    return full_dataset
+        sub = ds.select(range(start, end))
+        proc = sub.map(lambda x: apply_ade_transform_batch(x, mode), batched=True,
+                       batch_size=BATCH_SIZE, num_proc=NUM_WORKERS)
+        proc.save_to_disk(out_path)
+        paths.append(out_path)
+    full = concatenate_datasets([load_from_disk(p) for p in paths])
+    full.save_to_disk(save_dir)
+    return full
 
 
-def joint_transform(image: Image.Image, mask: Image.Image, size=INPUT_SIZE):
-    if image.mode != "RGB":
-        image = image.convert("RGB")
+def train_transform(image: Image.Image, mask: Image.Image):
+    if image.mode != 'RGB': image = image.convert('RGB')
     i, j, h, w = transforms.RandomResizedCrop.get_params(
         image, scale=(0.5, 1.0), ratio=(0.75, 1.33)
     )
-    image = TF.resized_crop(image, i, j, h, w, size=(size, size), interpolation=InterpolationMode.BILINEAR)
-    mask = TF.resized_crop(mask, i, j, h, w, size=(size, size), interpolation=InterpolationMode.NEAREST)
+    image = TF.resized_crop(image, i, j, h, w, size=(INPUT_SIZE, INPUT_SIZE),
+                            interpolation=InterpolationMode.BILINEAR)
+    mask = TF.resized_crop(mask, i, j, h, w, size=(INPUT_SIZE, INPUT_SIZE),
+                           interpolation=InterpolationMode.NEAREST)
     if random.random() < 0.5:
-        image = TF.hflip(image)
-        mask = TF.hflip(mask)
+        image, mask = TF.hflip(image), TF.hflip(mask)
     if random.random() < 0.3:
-        start, end = transforms.RandomPerspective.get_params(image.height, image.width, distortion_scale=0.1)
-        image = TF.perspective(image, start, end, interpolation=InterpolationMode.BILINEAR)
-        mask = TF.perspective(mask, start, end, interpolation=InterpolationMode.NEAREST)
+        start, end = transforms.RandomPerspective.get_params(
+            image.height, image.width, distortion_scale=0.1)
+        image, mask = TF.perspective(image, start, end, interpolation=InterpolationMode.BILINEAR), \
+            TF.perspective(mask, start, end, interpolation=InterpolationMode.NEAREST)
     if random.random() < 0.8:
         image = ColorJitter(0.4, 0.4, 0.4, 0.1)(image)
     if random.random() < 0.3:
@@ -137,251 +116,155 @@ def joint_transform(image: Image.Image, mask: Image.Image, size=INPUT_SIZE):
     return image, mask
 
 
-def val_joint_transform(image: Image.Image, mask: Image.Image, size=INPUT_SIZE):
-    if image.mode != "RGB":
-        image = image.convert("RGB")
+def val_transform(image: Image.Image, mask: Image.Image):
+    if image.mode != 'RGB': image = image.convert('RGB')
     image = TF.resize(image, 350, interpolation=InterpolationMode.BILINEAR)
     mask = TF.resize(mask, 350, interpolation=InterpolationMode.NEAREST)
-    image = TF.center_crop(image, size)
-    mask = TF.center_crop(mask, size)
-    image = TF.to_tensor(image)
-    image = F.normalize(image, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    image, mask = TF.center_crop(image, INPUT_SIZE), TF.center_crop(mask, INPUT_SIZE)
+    image = F.normalize(TF.to_tensor(image), [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     return image, mask
 
 
-def train_epoch(model, loader, optimizer, device, scaler, criterion_fn, use_amp, writer, epoch):
+def train_epoch(model, loader, optimizer, device, scaler, writer, epoch):
     model.train()
-    running_loss = 0
-    correct_pixels = 0
-    total_pixels = 0
-    start_time = time.time()
-
-    for batch_idx, batch in enumerate(tqdm(loader, desc='Train', leave=False)):
-        imgs = batch['pixel_values'].to(device)
-        masks = batch['labels'].to(device)
+    total_loss = 0.0
+    correct, total = 0, 0
+    start = time.time()
+    for batch in tqdm(loader, desc='Train', leave=False):
+        imgs, masks = batch['pixel_values'].to(device), batch['labels'].to(device)
         optimizer.zero_grad()
-
-        if use_amp:
-            with autocast("cuda"):
-                outputs = model(imgs)
-                if outputs.shape[-2:] != masks.shape[-2:]:
-                    outputs = torch.nn.functional.interpolate(
-                        outputs, size=masks.shape[-2:], mode='bilinear', align_corners=False
-                    )
-                loss = criterion_fn(outputs, masks)
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            scaler.step(optimizer)
-            scaler.update()
-        else:
+        with autocast(device_type='cuda') if device.type == 'cuda' else torch.no_grad():
             outputs = model(imgs)
             if outputs.shape[-2:] != masks.shape[-2:]:
-                outputs = torch.nn.functional.interpolate(
-                    outputs, size=masks.shape[-2:], mode='bilinear', align_corners=False
-                )
-            loss = criterion_fn(outputs, masks)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
-
-        running_loss += loss.item() * imgs.size(0)
-
-        preds = torch.argmax(outputs, dim=1)
-        valid_mask = masks != 255  # ignore_index == 255
-        correct_pixels += (preds[valid_mask] == masks[valid_mask]).sum().item()
-        total_pixels += valid_mask.sum().item()
-
-    end_time = time.time()
-    elapsed = end_time - start_time
-    samples_per_sec = len(loader.dataset) / elapsed
-
-    avg_loss = running_loss / len(loader.dataset)
-    train_acc = correct_pixels / total_pixels if total_pixels > 0 else 0.0
-
-    tqdm.write(f"Train Loss: {avg_loss:.4f} | Train Acc: {train_acc * 100:.2f}% | "
-               f"Epoch Time: {elapsed:.2f}s | Samples/sec: {samples_per_sec:.2f}")
-
+                outputs = F.interpolate(outputs, size=masks.shape[-2:], mode='bilinear', align_corners=False)
+            loss = F.cross_entropy(outputs, masks, ignore_index=255)
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        scaler.step(optimizer)
+        scaler.update()
+        total_loss += loss.item() * imgs.size(0)
+        preds = outputs.argmax(1)
+        mask = masks != 255
+        correct += (preds[mask] == masks[mask]).sum().item()
+        total += mask.sum().item()
+    elapsed = time.time() - start
+    avg_loss = total_loss / len(loader.dataset)
+    acc = correct / total if total > 0 else 0
     writer.add_scalar('Loss/train', avg_loss, epoch)
-    writer.add_scalar('Accuracy/train', train_acc, epoch)
-    writer.add_scalar('Speed/train_samples_per_sec', samples_per_sec, epoch)
-    writer.add_scalar('Time/train_epoch_time', elapsed, epoch)
+    writer.add_scalar('Accuracy/train', acc, epoch)
+    writer.add_scalar('Time/train_epoch', elapsed, epoch)
+    print(f"Train {epoch}: Loss={avg_loss:.4f}, Acc={acc * 100:.2f}%, Time={elapsed:.2f}s")
+    return avg_loss, acc
 
-    return avg_loss, train_acc
 
-
-def eval_epoch(model, loader, device, criterion_fn, writer=None, epoch=None):
+def eval_epoch(model, loader, device, writer, epoch):
     model.eval()
-    running_loss = 0
-    correct_pixels = 0
-    total_pixels = 0
-    all_preds = []
-    all_targets = []
-
-    start_time = time.time()
-    first_batch_saved = False
-
+    total_loss = 0.0
+    correct, total = 0, 0
+    inter = np.zeros(NUM_CLASSES, dtype=np.float64)
+    union = np.zeros(NUM_CLASSES, dtype=np.float64)
+    start = time.time()
+    first_saved = False
     with torch.no_grad():
-        for batch_idx, batch in enumerate(tqdm(loader, desc='Val', leave=False)):
-            imgs = batch['pixel_values'].to(device)
-            masks = batch['labels'].to(device)
+        for batch in tqdm(loader, desc='Val', leave=False):
+            imgs, masks = batch['pixel_values'].to(device), batch['labels'].to(device)
             outputs = model(imgs)
             if outputs.shape[-2:] != masks.shape[-2:]:
-                outputs = torch.nn.functional.interpolate(
-                    outputs, size=masks.shape[-2:], mode='bilinear', align_corners=False
-                )
-            loss = criterion_fn(outputs, masks)
-            running_loss += loss.item() * imgs.size(0)
-
-            preds = torch.argmax(outputs, dim=1)
-            valid_mask = masks != 255
-            correct_pixels += (preds[valid_mask] == masks[valid_mask]).sum().item()
-            total_pixels += valid_mask.sum().item()
-
-            all_preds.append(preds)
-            all_targets.append(masks)
-
-            if (not first_batch_saved) and (epoch is not None):
-                rand_idx = random.randint(0, imgs.size(0) - 1)
-                img_np = imgs[rand_idx].detach().cpu().permute(1, 2, 0).numpy()
-                img_np = (img_np * [0.229, 0.224, 0.225]) + [0.485, 0.456, 0.406]  # De-normalize
-                img_np = np.clip(img_np, 0, 1)
-
-                pred_mask = preds[rand_idx].cpu().numpy()
-                gt_mask = masks[rand_idx].cpu().numpy()
-
-                fig, axs = plt.subplots(1, 3, figsize=(12, 4))
-                axs[0].imshow(img_np)
-                axs[0].set_title("Input Image")
-                axs[1].imshow(gt_mask, cmap="nipy_spectral", vmin=0, vmax=NUM_CLASSES - 1)
-                axs[1].set_title("Ground Truth")
-                axs[2].imshow(pred_mask, cmap="nipy_spectral", vmin=0, vmax=NUM_CLASSES - 1)
-                axs[2].set_title("Prediction")
-
-                for ax in axs:
-                    ax.axis("off")
-
-                vis_dir = os.path.join(LOG_DIR, "val_vis")
-                os.makedirs(vis_dir, exist_ok=True)
+                outputs = F.interpolate(outputs, size=masks.shape[-2:], mode='bilinear', align_corners=False)
+            loss = F.cross_entropy(outputs, masks, ignore_index=255)
+            total_loss += loss.item() * imgs.size(0)
+            preds = outputs.argmax(1)
+            valid = masks != 255
+            correct += (preds[valid] == masks[valid]).sum().item()
+            total += valid.sum().item()
+            # update per-class stats
+            for c in range(NUM_CLASSES):
+                pred_c = (preds == c) & valid
+                tgt_c = (masks == c) & valid
+                inter[c] += pred_c.logical_and(tgt_c).sum().item()
+                union[c] += pred_c.logical_or(tgt_c).sum().item()
+            # save first sample
+            if not first_saved:
+                idx = random.randrange(imgs.size(0))
+                img_np = imgs[idx].cpu().permute(1, 2, 0).numpy()
+                img_np = np.clip(img_np * [0.229, 0.224, 0.225] + [0.485, 0.456, 0.406], 0, 1)
+                pm = preds[idx].cpu().numpy()
+                gm = masks[idx].cpu().numpy()
+                fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+                axes[0].imshow(img_np)
+                axes[0].set_title('Input')
+                axes[0].axis('off')
+                axes[1].imshow(gm, cmap='nipy_spectral', vmin=0, vmax=NUM_CLASSES - 1)
+                axes[1].set_title('GT')
+                axes[1].axis('off')
+                axes[2].imshow(pm, cmap='nipy_spectral', vmin=0, vmax=NUM_CLASSES - 1)
+                axes[2].set_title('Pred')
+                axes[2].axis('off')
+                os.makedirs(os.path.join(LOG_DIR, 'val_vis'), exist_ok=True)
                 plt.tight_layout()
-                plt.savefig(os.path.join(vis_dir, f"epoch_{epoch:02d}_sample.png"))
+                plt.savefig(os.path.join(LOG_DIR, 'val_vis', f'epoch_{epoch:02d}.png'))
                 plt.close()
-
-                first_batch_saved = True
-
-    end_time = time.time()
-    elapsed = end_time - start_time
-    samples_per_sec = len(loader.dataset) / elapsed
-
-    avg_loss = running_loss / len(loader.dataset)
-    accuracy = correct_pixels / total_pixels if total_pixels > 0 else 0.0
-    miou = calculate_miou(
-        torch.cat(all_preds).reshape(-1),
-        torch.cat(all_targets).reshape(-1),
-        NUM_CLASSES
-    )
-
-    print(f"Val Epoch Time: {elapsed:.2f}s | Samples/sec: {samples_per_sec:.2f}")
-
-    if writer is not None and epoch is not None:
-        writer.add_scalar('Speed/val_samples_per_sec', samples_per_sec, epoch)
-        writer.add_scalar('Time/val_epoch_time', elapsed, epoch)
-
-    return avg_loss, accuracy, miou
+                first_saved = True
+    elapsed = time.time() - start
+    avg_loss = total_loss / len(loader.dataset)
+    acc = correct / total if total > 0 else 0
+    miou, _ = calculate_miou_stats(inter, union)
+    writer.add_scalar('Loss/val', avg_loss, epoch)
+    writer.add_scalar('Accuracy/val', acc, epoch)
+    writer.add_scalar('mIoU/val', miou, epoch)
+    writer.add_scalar('Time/val_epoch', elapsed, epoch)
+    print(f"Val   {epoch}: Loss={avg_loss:.4f}, Acc={acc * 100:.2f}%, mIoU={miou * 100:.2f}%, Time={elapsed:.2f}s")
+    return avg_loss, acc, miou
 
 
 def main():
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    if os.path.exists(LOG_DIR):
-        shutil.rmtree(LOG_DIR)
-    writer = SummaryWriter(log_dir=LOG_DIR)
-
+    if os.path.exists(LOG_DIR): shutil.rmtree(LOG_DIR)
+    writer = SummaryWriter(LOG_DIR)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    use_amp = (device.type == 'cuda')
+    use_amp = device.type == 'cuda'
 
-    ds = load_dataset("scene_parse_150", trust_remote_code=True)
-
-    train_raw = ds['train']
-    val_raw = ds['validation']
-
-    num_workers = 4
-    chunk_size = 1000
-
-    if not os.path.exists(TRAIN_DISK_PATH):
-        train_ds = process_in_chunks(train_raw, chunk_size=chunk_size, mode='train', save_dir=TRAIN_DISK_PATH,
-                                     num_workers=num_workers)
-    else:
-        train_ds = load_from_disk(TRAIN_DISK_PATH)
-
-    if not os.path.exists(VAL_DISK_PATH):
-        val_ds = process_in_chunks(val_raw, chunk_size=chunk_size, mode='val', save_dir=VAL_DISK_PATH,
-                                   num_workers=num_workers)
-    else:
-        val_ds = load_from_disk(VAL_DISK_PATH)
-
+    ds = load_dataset('scene_parse_150', trust_remote_code=True)
+    train_raw, val_raw = ds['train'], ds['validation']
+    train_ds = load_from_disk(TRAIN_DISK_PATH) if os.path.exists(TRAIN_DISK_PATH) \
+        else process_in_chunks(train_raw, 1000, 'train', TRAIN_DISK_PATH)
+    val_ds = load_from_disk(VAL_DISK_PATH) if os.path.exists(VAL_DISK_PATH) \
+        else process_in_chunks(val_raw, 1000, 'val', VAL_DISK_PATH)
     train_ds.set_format(type='torch', columns=['pixel_values', 'labels'])
     val_ds.set_format(type='torch', columns=['pixel_values', 'labels'])
-
-    pin_mem = device.type == 'cuda'
-    train_loader = DataLoader(train_ds, batch_size=8, shuffle=True,
-                              num_workers=num_workers, pin_memory=pin_mem)
-    val_loader = DataLoader(val_ds, batch_size=8, shuffle=False,
-                            num_workers=num_workers, pin_memory=pin_mem)
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
+                              num_workers=NUM_WORKERS, pin_memory=(device.type == 'cuda'))
+    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False,
+                            num_workers=NUM_WORKERS, pin_memory=(device.type == 'cuda'))
 
     model = EssenceNetSegmenter(num_classes=NUM_CLASSES).to(device)
     if PRETRAINED_MODEL_PATH and os.path.exists(PRETRAINED_MODEL_PATH):
         model.load_state_dict(torch.load(PRETRAINED_MODEL_PATH, map_location=device))
 
-    criterion_fn = torch.nn.CrossEntropyLoss(ignore_index=255)
-    optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-6)
-    scheduler = CosineAnnealingLR(optimizer, T_max=30)
-    scaler = GradScaler()
+    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    scheduler = CosineAnnealingLR(optimizer, T_max=MAX_EPOCHS)
+    scaler = GradScaler() if use_amp else None
 
     best_loss = float('inf')
-    best_path = None
-    patience = 5
-    no_improve = 0
-    max_epochs = 30
-
-    total_start_time = time.time()  # 전체 학습 시간 시작
-
-    for epoch in range(1, max_epochs + 1):
-        print(f"\nEpoch {epoch}/{max_epochs}")
-        train_loss, train_acc = train_epoch(
-            model, train_loader, optimizer, device, scaler,
-            criterion_fn, use_amp, writer, epoch
-        )
-        val_loss, val_acc, val_miou = eval_epoch(model, val_loader, device, criterion_fn, writer, epoch)
-
-        # 기존 writer 기록은 train_epoch 내부에서 했으니 val만 추가
-        writer.add_scalar('Loss/val', val_loss, epoch)
-        writer.add_scalar('Accuracy/val', val_acc, epoch)
-        writer.add_scalar('mIoU/val', val_miou, epoch)
-
-        print(f"Val   Loss: {val_loss:.4f} | Acc: {val_acc * 100:.2f}% | mIoU: {val_miou * 100:.2f}%")
-
+    no_imp = 0
+    start_all = time.time()
+    for ep in range(1, MAX_EPOCHS + 1):
+        train_epoch(model, train_loader, optimizer, device, scaler, writer, ep)
+        val_loss, _, _ = eval_epoch(model, val_loader, device, writer, ep)
         scheduler.step()
-
-        # 체크포인트 저장
         torch.save(model.state_dict(), os.path.join(CHECKPOINT_DIR, 'last.pth'))
         if val_loss < best_loss:
-            best_loss = val_loss
-            no_improve = 0
-            best_path = os.path.join(
-                CHECKPOINT_DIR, f"best_epoch{epoch:02d}_loss{val_loss:.4f}.pth"
-            )
-            torch.save(model.state_dict(), best_path)
-            print(f"Saved best model: {os.path.basename(best_path)}")
+            best_loss, no_imp = val_loss, 0
+            path = os.path.join(CHECKPOINT_DIR, f'best_ep{ep:02d}_{val_loss:.4f}.pth')
+            torch.save(model.state_dict(), path)
+            print(f"Saved best: {os.path.basename(path)}")
         else:
-            no_improve += 1
-            if no_improve >= patience:
-                print(f"Early stopping at epoch {epoch}")
+            no_imp += 1
+            if no_imp >= PATIENCE:
+                print(f"Early stopping at ep{ep}")
                 break
-
-    total_end_time = time.time()
-    total_elapsed = total_end_time - total_start_time
-    print(f"\nTotal Training Time: {total_elapsed:.2f} seconds ({total_elapsed / 60:.2f} minutes)")
-
+    print(f"Total time: {(time.time() - start_all) / 60:.2f} min")
     writer.close()
 
 
