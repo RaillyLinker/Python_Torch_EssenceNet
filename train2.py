@@ -195,6 +195,7 @@ def eval_epoch(model, loader, device, writer, epoch, confmat):
     model.eval()
     total_loss = 0.0
     correct, total = 0, 0
+    inference_times = []
 
     start = time.time()
     with torch.no_grad(), autocast(device_type='cuda') if device.type == 'cuda' else nullcontext():
@@ -202,7 +203,14 @@ def eval_epoch(model, loader, device, writer, epoch, confmat):
             imgs = batch['pixel_values'].to(device)
             masks = batch['labels'].to(device)
 
+            torch.cuda.synchronize() if device.type == 'cuda' else None
+            t0 = time.time()
             outputs = model(imgs)
+            torch.cuda.synchronize() if device.type == 'cuda' else None
+            t1 = time.time()
+
+            inference_times.append(t1 - t0)
+
             if outputs.shape[-2:] != masks.shape[-2:]:
                 outputs = F.interpolate(outputs, size=masks.shape[-2:], mode='bilinear', align_corners=False)
 
@@ -214,7 +222,6 @@ def eval_epoch(model, loader, device, writer, epoch, confmat):
 
             correct += (preds[valid] == masks[valid]).sum().item()
             total += valid.sum().item()
-
             confmat.update(preds[valid].flatten(), masks[valid].flatten())
 
     elapsed = time.time() - start
@@ -226,12 +233,20 @@ def eval_epoch(model, loader, device, writer, epoch, confmat):
     union = cm.sum(1).double() + cm.sum(0).double() - inter
     miou = torch.nanmean(inter / (union + 1e-10)).item()
 
+    avg_infer_time = np.mean(inference_times)
+    avg_fps = 1.0 / avg_infer_time if avg_infer_time > 0 else 0
+
+    # TensorBoard 로그
     writer.add_scalar('Loss/val', avg_loss, epoch)
     writer.add_scalar('Accuracy/val', acc, epoch)
     writer.add_scalar('mIoU/val', miou, epoch)
     writer.add_scalar('Time/val_epoch', elapsed, epoch)
+    writer.add_scalar('Time/val_infer_avg', avg_infer_time, epoch)
+    writer.add_scalar('FPS/val', avg_fps, epoch)
 
-    print(f"Val   {epoch}: Loss={avg_loss:.4f}, Acc={acc * 100:.2f}%, mIoU={miou * 100:.2f}%, Time={elapsed:.2f}s")
+    print(f"Val   {epoch}: Loss={avg_loss:.4f}, Acc={acc * 100:.2f}%, "
+          f"mIoU={miou * 100:.2f}%, Time={elapsed:.2f}s, "
+          f"InferTime={avg_infer_time * 1000:.2f}ms, FPS={avg_fps:.2f}")
     return avg_loss, acc, miou
 
 
