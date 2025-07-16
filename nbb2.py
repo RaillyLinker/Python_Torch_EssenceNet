@@ -70,7 +70,7 @@ class EssenceNet(nn.Module):
         ])
 
         # 인코더 헤드
-        self.encoder_output = 1300
+        self.encoder_output = 1280
         self.encoder_head = nn.Sequential(
             nn.Conv2d(encoder_input, self.encoder_output, kernel_size=1, bias=False),
             nn.BatchNorm2d(self.encoder_output),
