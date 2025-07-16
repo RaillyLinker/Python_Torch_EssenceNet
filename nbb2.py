@@ -113,7 +113,7 @@ class EssenceNet(nn.Module):
 
         # 특징맵 피라미드들을 최고 해상도 기준으로 합치기
         concat_feats = torch.cat(
-            [F.interpolate(f, size=feats_list[0].shape[2:], mode='bilinear', align_corners=False) for f in feats_list],
+            [F.interpolate(f, size=feats_list[0].shape[2:], mode='nearest') for f in feats_list],
             dim=1
         )
 
