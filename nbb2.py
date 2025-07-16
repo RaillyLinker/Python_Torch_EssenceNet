@@ -31,78 +31,6 @@ def _double_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, dp, bs):
     )
 
 
-def _triple_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, dp, bs):
-    return nn.Sequential(
-        # 평면당 형태를 파악
-        nn.Conv2d(in_ch, mid_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
-        nn.BatchNorm2d(mid_ch),
-        nn.SiLU(),
-
-        # 픽셀별 의미 추출(희소한 특징 압축)
-        nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
-        nn.BatchNorm2d(out_ch),
-        nn.SiLU(),
-
-        nn.Conv2d(out_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
-        nn.BatchNorm2d(out_ch),
-        nn.SiLU(),
-
-        DropBlock2D(drop_prob=dp, block_size=bs)
-    )
-
-
-def _quadra_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, dp, bs):
-    return nn.Sequential(
-        # 평면당 형태를 파악
-        nn.Conv2d(in_ch, mid_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
-        nn.BatchNorm2d(mid_ch),
-        nn.SiLU(),
-
-        # 픽셀별 의미 추출(희소한 특징 압축)
-        nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
-        nn.BatchNorm2d(out_ch),
-        nn.SiLU(),
-
-        nn.Conv2d(out_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
-        nn.BatchNorm2d(out_ch),
-        nn.SiLU(),
-
-        nn.Conv2d(out_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
-        nn.BatchNorm2d(out_ch),
-        nn.SiLU(),
-
-        DropBlock2D(drop_prob=dp, block_size=bs)
-    )
-
-
-def _penta_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, dp, bs):
-    return nn.Sequential(
-        # 평면당 형태를 파악
-        nn.Conv2d(in_ch, mid_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
-        nn.BatchNorm2d(mid_ch),
-        nn.SiLU(),
-
-        # 픽셀별 의미 추출(희소한 특징 압축)
-        nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
-        nn.BatchNorm2d(out_ch),
-        nn.SiLU(),
-
-        nn.Conv2d(out_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
-        nn.BatchNorm2d(out_ch),
-        nn.SiLU(),
-
-        nn.Conv2d(out_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
-        nn.BatchNorm2d(out_ch),
-        nn.SiLU(),
-
-        nn.Conv2d(out_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
-        nn.BatchNorm2d(out_ch),
-        nn.SiLU(),
-
-        DropBlock2D(drop_prob=dp, block_size=bs)
-    )
-
-
 # (EssenceNet 백본)
 class EssenceNet(nn.Module):
     def __init__(self):
@@ -111,12 +39,12 @@ class EssenceNet(nn.Module):
         self.feats_convs = nn.ModuleList([
             _single_conv_block(3, 24, 3, 2, 1, 0.0, 1),  # 320x320 -> 160x160
             _double_conv_block(24, 96, 64, 3, 2, 1, 0.05, 3),  # 160x160 -> 80x80
-            _triple_conv_block(64, 128, 96, 3, 2, 1, 0.10, 3),  # 80x80 -> 40x40
-            _triple_conv_block(96, 192, 128, 3, 2, 1, 0.15, 5),  # 40x40 -> 20x20
-            _triple_conv_block(128, 256, 192, 3, 2, 1, 0.20, 5),  # 20x20 -> 10x10
-            _quadra_conv_block(192, 384, 256, 3, 2, 1, 0.20, 3),  # 10x10 -> 5x5
-            _quadra_conv_block(256, 512, 384, 3, 2, 1, 0.15, 3),  # 5x5 -> 3x3
-            _penta_conv_block(384, 1024, 512, 3, 1, 0, 0.0, 1)  # 3x3 -> 1x1
+            _double_conv_block(64, 128, 96, 3, 2, 1, 0.10, 3),  # 80x80 -> 40x40
+            _double_conv_block(96, 192, 128, 3, 2, 1, 0.15, 5),  # 40x40 -> 20x20
+            _double_conv_block(128, 256, 192, 3, 2, 1, 0.20, 5),  # 20x20 -> 10x10
+            _double_conv_block(192, 384, 256, 3, 2, 1, 0.20, 3),  # 10x10 -> 5x5
+            _double_conv_block(256, 512, 384, 3, 2, 1, 0.15, 3),  # 5x5 -> 3x3
+            _double_conv_block(384, 1024, 512, 3, 1, 0, 0.0, 1)  # 3x3 -> 1x1
         ])
 
         # 특징맵 피라미드 채널 수
@@ -126,6 +54,10 @@ class EssenceNet(nn.Module):
         self.encoder_output = encoder_input // 2
         self.encoder_head = nn.Sequential(
             nn.Conv2d(encoder_input, self.encoder_output, kernel_size=1, bias=False),
+            nn.BatchNorm2d(self.encoder_output),
+            nn.SiLU(),
+
+            nn.Conv2d(self.encoder_output, self.encoder_output, kernel_size=1, bias=False),
             nn.BatchNorm2d(self.encoder_output),
             nn.SiLU(),
 
