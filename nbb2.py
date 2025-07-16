@@ -99,6 +99,8 @@ class EssenceNetSegmenter(nn.Module):
             nn.BatchNorm2d(hidden),
             nn.SiLU(),
 
+            nn.Dropout2d(0.2),
+
             nn.Conv2d(hidden, num_classes, kernel_size=1)
         )
 
