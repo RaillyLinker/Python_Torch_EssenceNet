@@ -71,7 +71,7 @@ class EssenceNet(nn.Module):
         encoder_input = sum([conv[-4].out_channels for conv in self.feats_convs])
 
         # 인코더 헤드
-        self.encoder_output = encoder_input
+        self.encoder_output = encoder_input // 2
         self.encoder_head = nn.Sequential(
             nn.Conv2d(encoder_input, self.encoder_output, kernel_size=1, bias=False),
             nn.BatchNorm2d(self.encoder_output),
@@ -117,12 +117,13 @@ class EssenceNetSegmenter(nn.Module):
         backbone_output_ch = self.backbone.encoder_output
 
         # 분류기 헤드
+        hidden = backbone_output_ch // 2
         self.classifier_head = nn.Sequential(
-            nn.Conv2d(backbone_output_ch, num_classes, kernel_size=1, bias=False),
-            nn.BatchNorm2d(num_classes),
+            nn.Conv2d(backbone_output_ch, hidden, kernel_size=1, bias=False),
+            nn.BatchNorm2d(hidden),
             nn.SiLU(),
 
-            nn.Conv2d(num_classes, num_classes, kernel_size=1)
+            nn.Conv2d(hidden, num_classes, kernel_size=1)
         )
 
     def forward(self, x):
