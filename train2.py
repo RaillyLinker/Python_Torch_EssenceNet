@@ -3,7 +3,8 @@ import random
 import numpy as np
 import torch
 import torch.optim as optim
-import torchvision.transforms.functional as F
+import torchvision.transforms.functional as TF
+import torch.nn.functional as F
 from datasets import load_dataset, load_from_disk, concatenate_datasets
 from torch.amp import GradScaler
 from torch.amp import autocast
@@ -16,14 +17,28 @@ from PIL import Image
 from tqdm import tqdm
 import math
 import shutil
-import matplotlib.pyplot as plt  # 맨 위에 import 추가
-
+import matplotlib.pyplot as plt
+import time
+from sklearn.metrics import confusion_matrix
 from nbb2 import EssenceNetSegmenter
-import time  # 추가
-from sklearn.metrics import confusion_matrix  # mIoU 계산에 필요
+
+PRETRAINED_MODEL_PATH = None
+NUM_CLASSES = 150  # ADE20K number of classes
+TRAIN_DISK_PATH = "C:/dataset/ade20k_320/train"
+VAL_DISK_PATH = "C:/dataset/ade20k_320/val"
+LOG_DIR = "runs/ade_exp"
+CHECKPOINT_DIR = "checkpoints"
+INPUT_SIZE = 320
+SEED = 42
+torch.manual_seed(SEED)
+random.seed(SEED)
+np.random.seed(SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
-# === mIoU 계산 함수 추가 ===
 def calculate_miou(y_pred, y_true, num_classes, ignore_index=255, return_iou=False):
     y_pred = y_pred.view(-1)
     y_true = y_true.view(-1)
@@ -40,48 +55,22 @@ def calculate_miou(y_pred, y_true, num_classes, ignore_index=255, return_iou=Fal
     return (miou, iou) if return_iou else miou
 
 
-# reproducibility seed
-SEED = 42
-torch.manual_seed(SEED)
-random.seed(SEED)
-np.random.seed(SEED)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(SEED)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-# paths & constants
-PRETRAINED_MODEL_PATH = None
-NUM_CLASSES = 150  # ADE20K number of classes
-TRAIN_DISK_PATH = "C:/dataset/ade20k_320/train"
-VAL_DISK_PATH = "C:/dataset/ade20k_320/val"
-LOG_DIR = "runs/ade_exp"
-CHECKPOINT_DIR = "checkpoints"
-INPUT_SIZE = 320
-
-
 def apply_ade_transform_batch(batch, mode: str):
     images, labels = [], []
     for img, mask in zip(batch["image"], batch["annotation"]):
         img_t, m_t = (joint_transform if mode == 'train' else val_joint_transform)(img, mask)
-        # PIL/Tensor → numpy int64
         m_arr = (np.array(m_t, dtype=np.int64)
                  if isinstance(m_t, Image.Image)
                  else (m_t.numpy().astype(np.int64) if torch.is_tensor(m_t)
                        else np.array(m_t, dtype=np.int64)))
         if m_arr.ndim == 3:
             m_arr = m_arr[0]
-        # ==== 여기를 이렇게 바꿔주세요 ====
-        # 1 ≤ original_label ≤ 150 → 0~149 로 매핑
-        # 그 외 (0 혹은 >150) → 255 (ignore_index)
-        m_arr = np.where((m_arr >= 1) & (m_arr <= NUM_CLASSES),
-                         m_arr - 1,
-                         255)
+        m_arr = np.where((m_arr >= 1) & (m_arr <= NUM_CLASSES), m_arr - 1, 255)
         labels.append(torch.tensor(m_arr, dtype=torch.long))
         images.append(img_t)
 
-    images = torch.stack(images).numpy()
-    labels = torch.stack(labels).numpy()
+    images = torch.stack(images)
+    labels = torch.stack(labels)
     return {'pixel_values': images, 'labels': labels}
 
 
@@ -116,42 +105,34 @@ def process_in_chunks(dataset, chunk_size, mode, save_dir, num_workers):
         processed.save_to_disk(chunk_path)
         chunk_paths.append(chunk_path)
 
-    # 모든 조각 불러와서 병합
     all_chunks = [load_from_disk(p) for p in chunk_paths]
     full_dataset = concatenate_datasets(all_chunks)
-
     full_dataset.save_to_disk(save_dir)
 
     return full_dataset
 
 
-# joint 이미지·마스크 공간 변형 함수
 def joint_transform(image: Image.Image, mask: Image.Image, size=INPUT_SIZE):
     if image.mode != "RGB":
         image = image.convert("RGB")
-    # 1) RandomResizedCrop
     i, j, h, w = transforms.RandomResizedCrop.get_params(
         image, scale=(0.5, 1.0), ratio=(0.75, 1.33)
     )
-    image = F.resized_crop(image, i, j, h, w, size=(size, size), interpolation=InterpolationMode.BILINEAR)
-    mask = F.resized_crop(mask, i, j, h, w, size=(size, size), interpolation=InterpolationMode.NEAREST)
-    # 2) RandomHorizontalFlip
+    image = TF.resized_crop(image, i, j, h, w, size=(size, size), interpolation=InterpolationMode.BILINEAR)
+    mask = TF.resized_crop(mask, i, j, h, w, size=(size, size), interpolation=InterpolationMode.NEAREST)
     if random.random() < 0.5:
-        image = F.hflip(image)
-        mask = F.hflip(mask)
-    # 3) RandomPerspective
+        image = TF.hflip(image)
+        mask = TF.hflip(mask)
     if random.random() < 0.3:
         start, end = transforms.RandomPerspective.get_params(image.height, image.width, distortion_scale=0.1)
-        image = F.perspective(image, start, end, interpolation=InterpolationMode.BILINEAR)
-        mask = F.perspective(mask, start, end, interpolation=InterpolationMode.NEAREST)
-    # 4) ColorJitter & GaussianBlur on image only
+        image = TF.perspective(image, start, end, interpolation=InterpolationMode.BILINEAR)
+        mask = TF.perspective(mask, start, end, interpolation=InterpolationMode.NEAREST)
     if random.random() < 0.8:
         image = ColorJitter(0.4, 0.4, 0.4, 0.1)(image)
     if random.random() < 0.3:
         k = random.choice((3, 5))
         image = transforms.GaussianBlur(k, sigma=(0.1, 1.5))(image)
-    # ToTensor & Normalize
-    image = F.to_tensor(image)
+    image = TF.to_tensor(image)
     image = F.normalize(image, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     return image, mask
 
@@ -159,35 +140,30 @@ def joint_transform(image: Image.Image, mask: Image.Image, size=INPUT_SIZE):
 def val_joint_transform(image: Image.Image, mask: Image.Image, size=INPUT_SIZE):
     if image.mode != "RGB":
         image = image.convert("RGB")
-    # resize → center crop
-    image = F.resize(image, 350, interpolation=InterpolationMode.BILINEAR)
-    mask = F.resize(mask, 350, interpolation=InterpolationMode.NEAREST)
-    image = F.center_crop(image, size)
-    mask = F.center_crop(mask, size)
-    # ToTensor & Normalize only for image
-    image = F.to_tensor(image)
+    image = TF.resize(image, 350, interpolation=InterpolationMode.BILINEAR)
+    mask = TF.resize(mask, 350, interpolation=InterpolationMode.NEAREST)
+    image = TF.center_crop(image, size)
+    mask = TF.center_crop(mask, size)
+    image = TF.to_tensor(image)
     image = F.normalize(image, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     return image, mask
 
 
-# 한 epoch 학습
 def train_epoch(model, loader, optimizer, device, scaler, criterion_fn, use_amp, writer, epoch):
     model.train()
     running_loss = 0
     correct_pixels = 0
     total_pixels = 0
-    start_time = time.time()  # 시간 측정 시작
+    start_time = time.time()
 
     for batch_idx, batch in enumerate(tqdm(loader, desc='Train', leave=False)):
         imgs = batch['pixel_values'].to(device)
         masks = batch['labels'].to(device)
         optimizer.zero_grad()
 
-        # --- forward & loss ---
         if use_amp:
             with autocast("cuda"):
                 outputs = model(imgs)
-                # resize if needed
                 if outputs.shape[-2:] != masks.shape[-2:]:
                     outputs = torch.nn.functional.interpolate(
                         outputs, size=masks.shape[-2:], mode='bilinear', align_corners=False
@@ -211,13 +187,11 @@ def train_epoch(model, loader, optimizer, device, scaler, criterion_fn, use_amp,
 
         running_loss += loss.item() * imgs.size(0)
 
-        # --- accuracy 계산 (ignore_index 제외) ---
         preds = torch.argmax(outputs, dim=1)
         valid_mask = masks != 255  # ignore_index == 255
         correct_pixels += (preds[valid_mask] == masks[valid_mask]).sum().item()
         total_pixels += valid_mask.sum().item()
 
-    # --- epoch 단위 평균 loss & accuracy ---
     end_time = time.time()
     elapsed = end_time - start_time
     samples_per_sec = len(loader.dataset) / elapsed
@@ -225,9 +199,8 @@ def train_epoch(model, loader, optimizer, device, scaler, criterion_fn, use_amp,
     avg_loss = running_loss / len(loader.dataset)
     train_acc = correct_pixels / total_pixels if total_pixels > 0 else 0.0
 
-    # --- 화면 출력 및 TensorBoard 기록 ---
-    print(f"Train Loss: {avg_loss:.4f} | Train Acc: {train_acc * 100:.2f}%")
-    print(f"Epoch Time: {elapsed:.2f}s | Samples/sec: {samples_per_sec:.2f}")
+    tqdm.write(f"Train Loss: {avg_loss:.4f} | Train Acc: {train_acc * 100:.2f}% | "
+               f"Epoch Time: {elapsed:.2f}s | Samples/sec: {samples_per_sec:.2f}")
 
     writer.add_scalar('Loss/train', avg_loss, epoch)
     writer.add_scalar('Accuracy/train', train_acc, epoch)
@@ -237,7 +210,6 @@ def train_epoch(model, loader, optimizer, device, scaler, criterion_fn, use_amp,
     return avg_loss, train_acc
 
 
-# 한 epoch 검증
 def eval_epoch(model, loader, device, criterion_fn, writer=None, epoch=None):
     model.eval()
     running_loss = 0
@@ -247,7 +219,7 @@ def eval_epoch(model, loader, device, criterion_fn, writer=None, epoch=None):
     all_targets = []
 
     start_time = time.time()
-    first_batch_saved = False  # 첫 배치 저장 여부
+    first_batch_saved = False
 
     with torch.no_grad():
         for batch_idx, batch in enumerate(tqdm(loader, desc='Val', leave=False)):
@@ -269,7 +241,6 @@ def eval_epoch(model, loader, device, criterion_fn, writer=None, epoch=None):
             all_preds.append(preds)
             all_targets.append(masks)
 
-            # --- 첫 번째 배치에서 시각화 이미지 저장 ---
             if (not first_batch_saved) and (epoch is not None):
                 rand_idx = random.randint(0, imgs.size(0) - 1)
                 img_np = imgs[rand_idx].detach().cpu().permute(1, 2, 0).numpy()
@@ -319,7 +290,6 @@ def eval_epoch(model, loader, device, criterion_fn, writer=None, epoch=None):
     return avg_loss, accuracy, miou
 
 
-# 메인 함수
 def main():
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     if os.path.exists(LOG_DIR):
@@ -329,22 +299,11 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     use_amp = (device.type == 'cuda')
 
-    # prepare dataset
     ds = load_dataset("scene_parse_150", trust_remote_code=True)
-
-    # # 2. 전체 구조 및 column 이름 보기
-    # print(ds)  # DatasetDict({'train': Dataset, 'validation': Dataset})
-    # print(ds['train'].column_names)
-    # print(ds['train'].features)
-    #
-    # # 3. 샘플 출력
-    # print(ds['train'][0])  # 또는 random.sample(ds['train'], 3)
 
     train_raw = ds['train']
     val_raw = ds['validation']
 
-    # train_raw = ds['train'].select(range(100))
-    # val_raw = ds['validation'].select(range(50))
     num_workers = 4
     chunk_size = 1000
 
@@ -369,7 +328,6 @@ def main():
     val_loader = DataLoader(val_ds, batch_size=8, shuffle=False,
                             num_workers=num_workers, pin_memory=pin_mem)
 
-    # model, optimizer, scheduler 준비
     model = EssenceNetSegmenter(num_classes=NUM_CLASSES).to(device)
     if PRETRAINED_MODEL_PATH and os.path.exists(PRETRAINED_MODEL_PATH):
         model.load_state_dict(torch.load(PRETRAINED_MODEL_PATH, map_location=device))
@@ -377,7 +335,7 @@ def main():
     criterion_fn = torch.nn.CrossEntropyLoss(ignore_index=255)
     optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-6)
     scheduler = CosineAnnealingLR(optimizer, T_max=30)
-    scaler = GradScaler(device)
+    scaler = GradScaler()
 
     best_loss = float('inf')
     best_path = None
