@@ -45,7 +45,28 @@ class EssenceNet(nn.Module):
             _double_conv_block(256, 768, 384, 3, 1, 0, 0.0, 1)  # 3x3 -> 1x1
         ])
 
-        # todo : Residual 추가해보기(바로 직전 플러스 방식 or 처음부터 이전까지 누적 플러스 방식)
+        # todo : Residual 처음부터 이전까지 누적 플러스 방식 적용해보기 or 특징이 아니라 입력 이미지만 한번에 축소해놓고 잔차 더하기
+        # feats_convs 를 기반으로 projection 레이어 자동 생성
+        self.projections = nn.ModuleList()
+        prev_out_ch = 3  # 입력 이미지 채널 (RGB)
+        for conv_block in self.feats_convs:
+            conv_layers = [layer for layer in conv_block.modules() if isinstance(layer, nn.Conv2d)]
+            last_conv = conv_layers[-1]
+            out_ch = last_conv.out_channels
+
+            self.projections.append(
+                nn.Sequential(
+                    nn.Conv2d(prev_out_ch, (prev_out_ch + out_ch) // 2, kernel_size=1, stride=1, bias=False),
+                    nn.BatchNorm2d((prev_out_ch + out_ch) // 2),
+                    nn.SiLU(),
+
+                    nn.Conv2d((prev_out_ch + out_ch) // 2, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
+                    nn.BatchNorm2d(out_ch),
+                    nn.SiLU()
+                )
+            )
+
+            prev_out_ch = out_ch
 
         # 특징맵 피라미드 채널 수
         def get_last_conv_out_channels(block: nn.Module) -> int:
@@ -75,8 +96,21 @@ class EssenceNet(nn.Module):
 
         feat = x
         for idx, conv in enumerate(self.feats_convs):
+            # # Residual 용 특징 저장
+            identity = feat
+
             # Conv 연산
             feat = conv(feat)
+
+            # Residual 해상도 맞추기
+            if not isinstance(self.projections[idx], nn.Identity):
+                identity = F.interpolate(identity, size=feat.shape[2:], mode='area')
+
+            # Residual 채널 맞추기
+            projected = self.projections[idx](identity)
+
+            # Residual 합치기
+            feat = feat + projected
 
             # 특징 저장
             feats_list.append(feat)
