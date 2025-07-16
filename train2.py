@@ -16,13 +16,13 @@ from PIL import Image
 from tqdm import tqdm
 import math
 import shutil
-import matplotlib.pyplot as plt
 import time
+from torchmetrics import ConfusionMatrix
 from nbb2 import EssenceNetSegmenter
+from contextlib import nullcontext
 
-# Paths and hyperparameters
 PRETRAINED_MODEL_PATH = None
-NUM_CLASSES = 150  # ADE20K number of classes
+NUM_CLASSES = 150
 TRAIN_DISK_PATH = "C:/dataset/ade20k_320/train"
 VAL_DISK_PATH = "C:/dataset/ade20k_320/val"
 LOG_DIR = "runs/ade_exp"
@@ -35,8 +35,8 @@ LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 1e-6
 MAX_EPOCHS = 30
 PATIENCE = 5
+DEBUG_VIS = True
 
-# reproducibility
 torch.manual_seed(SEED)
 random.seed(SEED)
 np.random.seed(SEED)
@@ -46,15 +46,11 @@ if torch.cuda.is_available():
     torch.backends.cudnn.benchmark = False
 
 
-# mIoU calculator no longer uses confusion matrix on full dataset
-
 def calculate_miou_stats(intersection: np.ndarray, union: np.ndarray):
     iou = np.where(union > 0, intersection / (union + 1e-10), np.nan)
     miou = np.nanmean(iou) if np.any(~np.isnan(iou)) else 0.0
     return miou, iou
 
-
-# Transformations
 
 def apply_ade_transform_batch(batch, mode: str):
     images, labels = [], []
@@ -90,29 +86,55 @@ def process_in_chunks(ds, chunk_size, mode, save_dir):
     return full
 
 
+COLOR_JITTER = ColorJitter(0.4, 0.4, 0.4, 0.1)
+GAUSSIAN_BLURS = {
+    3: transforms.GaussianBlur(3, sigma=(0.1, 1.5)),
+    5: transforms.GaussianBlur(5, sigma=(0.1, 1.5)),
+}
+
+
 def train_transform(image: Image.Image, mask: Image.Image):
-    if image.mode != 'RGB': image = image.convert('RGB')
+    if image.mode != 'RGB':
+        image = image.convert('RGB')
+
     i, j, h, w = transforms.RandomResizedCrop.get_params(
         image, scale=(0.5, 1.0), ratio=(0.75, 1.33)
     )
-    image = TF.resized_crop(image, i, j, h, w, size=(INPUT_SIZE, INPUT_SIZE),
-                            interpolation=InterpolationMode.BILINEAR)
-    mask = TF.resized_crop(mask, i, j, h, w, size=(INPUT_SIZE, INPUT_SIZE),
-                           interpolation=InterpolationMode.NEAREST)
+    image = TF.resized_crop(
+        image, i, j, h, w,
+        size=(INPUT_SIZE, INPUT_SIZE),
+        interpolation=InterpolationMode.BILINEAR
+    )
+    mask = TF.resized_crop(
+        mask, i, j, h, w,
+        size=(INPUT_SIZE, INPUT_SIZE),
+        interpolation=InterpolationMode.NEAREST
+    )
+
     if random.random() < 0.5:
         image, mask = TF.hflip(image), TF.hflip(mask)
+
     if random.random() < 0.3:
         start, end = transforms.RandomPerspective.get_params(
-            image.height, image.width, distortion_scale=0.1)
-        image, mask = TF.perspective(image, start, end, interpolation=InterpolationMode.BILINEAR), \
-            TF.perspective(mask, start, end, interpolation=InterpolationMode.NEAREST)
+            image.height, image.width, distortion_scale=0.1
+        )
+        image = TF.perspective(
+            image, start, end, interpolation=InterpolationMode.BILINEAR
+        )
+        mask = TF.perspective(
+            mask, start, end, interpolation=InterpolationMode.NEAREST
+        )
+
     if random.random() < 0.8:
-        image = ColorJitter(0.4, 0.4, 0.4, 0.1)(image)
+        image = COLOR_JITTER(image)
+
     if random.random() < 0.3:
         k = random.choice((3, 5))
-        image = transforms.GaussianBlur(k, sigma=(0.1, 1.5))(image)
+        image = GAUSSIAN_BLURS[k](image)
+
     image = TF.to_tensor(image)
     image = F.normalize(image, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+
     return image, mask
 
 
@@ -125,16 +147,22 @@ def val_transform(image: Image.Image, mask: Image.Image):
     return image, mask
 
 
-def train_epoch(model, loader, optimizer, device, scaler, writer, epoch):
+def train_epoch(model, loader, optimizer, device, scaler, writer, epoch, amp_ctx):
     model.train()
     total_loss = 0.0
     correct, total = 0, 0
     start = time.time()
+    inference_times = []
     for batch in tqdm(loader, desc='Train', leave=False):
         imgs, masks = batch['pixel_values'].to(device), batch['labels'].to(device)
         optimizer.zero_grad()
-        with autocast(device_type='cuda') if device.type == 'cuda' else torch.no_grad():
+        with amp_ctx:
+            torch.cuda.synchronize() if device.type == 'cuda' else None
+            t0 = time.time()
             outputs = model(imgs)
+            torch.cuda.synchronize() if device.type == 'cuda' else None
+            t1 = time.time()
+            inference_times.append(t1 - t0)
             if outputs.shape[-2:] != masks.shape[-2:]:
                 outputs = F.interpolate(outputs, size=masks.shape[-2:], mode='bilinear', align_corners=False)
             loss = F.cross_entropy(outputs, masks, ignore_index=255)
@@ -154,66 +182,54 @@ def train_epoch(model, loader, optimizer, device, scaler, writer, epoch):
     writer.add_scalar('Loss/train', avg_loss, epoch)
     writer.add_scalar('Accuracy/train', acc, epoch)
     writer.add_scalar('Time/train_epoch', elapsed, epoch)
+    avg_infer = np.mean(inference_times)
+    writer.add_scalar('Time/train_infer_avg', avg_infer, epoch)
+    print(f"Train {epoch}: Inference Time Avg = {avg_infer:.4f}s")
     print(f"Train {epoch}: Loss={avg_loss:.4f}, Acc={acc * 100:.2f}%, Time={elapsed:.2f}s")
     return avg_loss, acc
 
 
-def eval_epoch(model, loader, device, writer, epoch):
+def eval_epoch(model, loader, device, writer, epoch, confmat):
+    confmat.reset()
     model.eval()
     total_loss = 0.0
     correct, total = 0, 0
-    inter = np.zeros(NUM_CLASSES, dtype=np.float64)
-    union = np.zeros(NUM_CLASSES, dtype=np.float64)
+
     start = time.time()
-    first_saved = False
-    with torch.no_grad():
+    with torch.no_grad(), autocast(device_type='cuda') if device.type == 'cuda' else nullcontext():
         for batch in tqdm(loader, desc='Val', leave=False):
-            imgs, masks = batch['pixel_values'].to(device), batch['labels'].to(device)
+            imgs = batch['pixel_values'].to(device)
+            masks = batch['labels'].to(device)
+
             outputs = model(imgs)
             if outputs.shape[-2:] != masks.shape[-2:]:
                 outputs = F.interpolate(outputs, size=masks.shape[-2:], mode='bilinear', align_corners=False)
+
             loss = F.cross_entropy(outputs, masks, ignore_index=255)
             total_loss += loss.item() * imgs.size(0)
+
             preds = outputs.argmax(1)
             valid = masks != 255
+
             correct += (preds[valid] == masks[valid]).sum().item()
             total += valid.sum().item()
-            # update per-class stats
-            for c in range(NUM_CLASSES):
-                pred_c = (preds == c) & valid
-                tgt_c = (masks == c) & valid
-                inter[c] += pred_c.logical_and(tgt_c).sum().item()
-                union[c] += pred_c.logical_or(tgt_c).sum().item()
-            # save first sample
-            if not first_saved:
-                idx = random.randrange(imgs.size(0))
-                img_np = imgs[idx].cpu().permute(1, 2, 0).numpy()
-                img_np = np.clip(img_np * [0.229, 0.224, 0.225] + [0.485, 0.456, 0.406], 0, 1)
-                pm = preds[idx].cpu().numpy()
-                gm = masks[idx].cpu().numpy()
-                fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-                axes[0].imshow(img_np)
-                axes[0].set_title('Input')
-                axes[0].axis('off')
-                axes[1].imshow(gm, cmap='nipy_spectral', vmin=0, vmax=NUM_CLASSES - 1)
-                axes[1].set_title('GT')
-                axes[1].axis('off')
-                axes[2].imshow(pm, cmap='nipy_spectral', vmin=0, vmax=NUM_CLASSES - 1)
-                axes[2].set_title('Pred')
-                axes[2].axis('off')
-                os.makedirs(os.path.join(LOG_DIR, 'val_vis'), exist_ok=True)
-                plt.tight_layout()
-                plt.savefig(os.path.join(LOG_DIR, 'val_vis', f'epoch_{epoch:02d}.png'))
-                plt.close()
-                first_saved = True
+
+            confmat.update(preds[valid].flatten(), masks[valid].flatten())
+
     elapsed = time.time() - start
     avg_loss = total_loss / len(loader.dataset)
     acc = correct / total if total > 0 else 0
-    miou, _ = calculate_miou_stats(inter, union)
+
+    cm = confmat.compute()
+    inter = torch.diagonal(cm).double()
+    union = cm.sum(1).double() + cm.sum(0).double() - inter
+    miou = torch.nanmean(inter / (union + 1e-10)).item()
+
     writer.add_scalar('Loss/val', avg_loss, epoch)
     writer.add_scalar('Accuracy/val', acc, epoch)
     writer.add_scalar('mIoU/val', miou, epoch)
     writer.add_scalar('Time/val_epoch', elapsed, epoch)
+
     print(f"Val   {epoch}: Loss={avg_loss:.4f}, Acc={acc * 100:.2f}%, mIoU={miou * 100:.2f}%, Time={elapsed:.2f}s")
     return avg_loss, acc, miou
 
@@ -224,19 +240,23 @@ def main():
     writer = SummaryWriter(LOG_DIR)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     use_amp = device.type == 'cuda'
+    confmat = ConfusionMatrix(task="multiclass", num_classes=NUM_CLASSES).to(device)
+    amp_ctx = autocast(device_type='cuda') if use_amp else nullcontext()
 
     ds = load_dataset('scene_parse_150', trust_remote_code=True)
     train_raw, val_raw = ds['train'], ds['validation']
-    train_ds = load_from_disk(TRAIN_DISK_PATH) if os.path.exists(TRAIN_DISK_PATH) \
-        else process_in_chunks(train_raw, 1000, 'train', TRAIN_DISK_PATH)
-    val_ds = load_from_disk(VAL_DISK_PATH) if os.path.exists(VAL_DISK_PATH) \
-        else process_in_chunks(val_raw, 1000, 'val', VAL_DISK_PATH)
+    train_ds = load_from_disk(TRAIN_DISK_PATH) if os.path.exists(TRAIN_DISK_PATH) else process_in_chunks(train_raw,
+                                                                                                         1000, 'train',
+                                                                                                         TRAIN_DISK_PATH)
+    val_ds = load_from_disk(VAL_DISK_PATH) if os.path.exists(VAL_DISK_PATH) else process_in_chunks(val_raw, 1000, 'val',
+                                                                                                   VAL_DISK_PATH)
     train_ds.set_format(type='torch', columns=['pixel_values', 'labels'])
     val_ds.set_format(type='torch', columns=['pixel_values', 'labels'])
+
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
-                              num_workers=NUM_WORKERS, pin_memory=(device.type == 'cuda'))
+                              num_workers=NUM_WORKERS, pin_memory=(device.type == 'cuda'), persistent_workers=True)
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False,
-                            num_workers=NUM_WORKERS, pin_memory=(device.type == 'cuda'))
+                            num_workers=NUM_WORKERS, pin_memory=(device.type == 'cuda'), persistent_workers=True)
 
     model = EssenceNetSegmenter(num_classes=NUM_CLASSES).to(device)
     if PRETRAINED_MODEL_PATH and os.path.exists(PRETRAINED_MODEL_PATH):
@@ -248,10 +268,9 @@ def main():
 
     best_loss = float('inf')
     no_imp = 0
-    start_all = time.time()
     for ep in range(1, MAX_EPOCHS + 1):
-        train_epoch(model, train_loader, optimizer, device, scaler, writer, ep)
-        val_loss, _, _ = eval_epoch(model, val_loader, device, writer, ep)
+        train_epoch(model, train_loader, optimizer, device, scaler, writer, ep, amp_ctx)
+        val_loss, _, _ = eval_epoch(model, val_loader, device, writer, ep, confmat)
         scheduler.step()
         torch.save(model.state_dict(), os.path.join(CHECKPOINT_DIR, 'last.pth'))
         if val_loss < best_loss:
@@ -264,7 +283,6 @@ def main():
             if no_imp >= PATIENCE:
                 print(f"Early stopping at ep{ep}")
                 break
-    print(f"Total time: {(time.time() - start_all) / 60:.2f} min")
     writer.close()
 
 
