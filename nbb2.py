@@ -4,14 +4,23 @@ import torch.nn.functional as F
 from dropblock import DropBlock2D
 
 
-def _single_conv_block(in_ch, out_ch, ks, strd, pdd, dp, bs):
+class DropBlockWrapper(nn.Module):
+    def __init__(self, drop_prob, block_size):
+        super().__init__()
+        self.drop_block = DropBlock2D(drop_prob, block_size)
+
+    def forward(self, x):
+        if self.training:
+            return self.drop_block(x)
+        return x  # 추론 시 그대로 반환
+
+
+def _single_conv_block(in_ch, out_ch, ks, strd, pdd):
     return nn.Sequential(
         # 평면당 형태를 파악
         nn.Conv2d(in_ch, out_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
         nn.BatchNorm2d(out_ch),
-        nn.SiLU(),
-
-        DropBlock2D(drop_prob=dp, block_size=bs)
+        nn.SiLU()
     )
 
 
@@ -27,8 +36,15 @@ def _double_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, dp, bs):
         nn.BatchNorm2d(out_ch),
         nn.SiLU(),
 
-        DropBlock2D(drop_prob=dp, block_size=bs)
+        DropBlockWrapper(drop_prob=dp, block_size=bs)
     )
+
+
+def get_last_conv_out_channels(block: nn.Module) -> int:
+    for layer in reversed(list(block.children())):
+        if isinstance(layer, nn.Conv2d):
+            return layer.out_channels
+    raise ValueError("No Conv2d layer found in block")
 
 
 # (EssenceNet 백본)
@@ -37,7 +53,7 @@ class EssenceNet(nn.Module):
         super().__init__()
 
         self.feats_convs = nn.ModuleList([
-            _single_conv_block(3, 32, 3, 2, 1, 0.0, 1),  # 320x320 -> 160x160
+            _single_conv_block(3, 32, 3, 2, 1),  # 320x320 -> 160x160
             _double_conv_block(32, 96, 48, 3, 2, 1, 0.05, 3),  # 160x160 -> 80x80
             _double_conv_block(48, 128, 64, 3, 2, 1, 0.10, 3),  # 80x80 -> 40x40
             _double_conv_block(64, 192, 96, 3, 2, 1, 0.15, 5),  # 40x40 -> 20x20
@@ -48,7 +64,10 @@ class EssenceNet(nn.Module):
         ])
 
         # 특징맵 피라미드 채널 수
-        encoder_input = sum([conv[-4].out_channels for conv in self.feats_convs])
+        encoder_input = sum([
+            get_last_conv_out_channels(conv)
+            for conv in self.feats_convs
+        ])
 
         # 인코더 헤드
         self.encoder_output = 1300
