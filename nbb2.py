@@ -60,7 +60,7 @@ class EssenceNet(nn.Module):
             _single_conv_block(3, 24, 3, 2, 1, 0.0, 1),  # 320x320 -> 160x160
             _double_conv_block(24, 96, 64, 3, 2, 1, 0.05, 3),  # 160x160 -> 80x80
             _double_conv_block(64, 128, 96, 3, 2, 1, 0.10, 3),  # 80x80 -> 40x40
-            _double_conv_block(96, 192, 128, 3, 2, 1, 0.15, 5),  # 40x40 -> 20x20
+            _triple_conv_block(96, 192, 128, 3, 2, 1, 0.15, 5),  # 40x40 -> 20x20
             _triple_conv_block(128, 256, 192, 3, 2, 1, 0.20, 5),  # 20x20 -> 10x10
             _triple_conv_block(192, 384, 256, 3, 2, 1, 0.20, 3),  # 10x10 -> 5x5
             _triple_conv_block(256, 512, 384, 3, 2, 1, 0.15, 3),  # 5x5 -> 3x3
