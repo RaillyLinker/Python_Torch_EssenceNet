@@ -21,6 +21,8 @@ from torchmetrics import ConfusionMatrix
 from nbb2 import EssenceNetSegmenter
 from contextlib import nullcontext
 
+# todo : 헤드만 변경해서 다른 데이터셋도 변경
+
 PRETRAINED_MODEL_PATH = None
 NUM_CLASSES = 150
 TRAIN_DISK_PATH = "C:/dataset/ade20k_320/train"
@@ -35,7 +37,6 @@ LEARNING_RATE = 1e-4
 WEIGHT_DECAY = 1e-6
 MAX_EPOCHS = 30
 PATIENCE = 5
-DEBUG_VIS = True
 
 torch.manual_seed(SEED)
 random.seed(SEED)

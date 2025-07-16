@@ -45,6 +45,8 @@ class EssenceNet(nn.Module):
             _double_conv_block(256, 768, 384, 3, 1, 0, 0.0, 1)  # 3x3 -> 1x1
         ])
 
+        # todo : Residual 추가해보기(바로 직전 플러스 방식 or 처음부터 이전까지 누적 플러스 방식)
+
         # 특징맵 피라미드 채널 수
         def get_last_conv_out_channels(block: nn.Module) -> int:
             for layer in reversed(list(block.children())):
@@ -81,7 +83,7 @@ class EssenceNet(nn.Module):
 
         # 특징맵 피라미드들을 최고 해상도 기준으로 합치기
         concat_feats = torch.cat(
-            [F.interpolate(f, size=feats_list[0].shape[2:], mode='nearest') for f in feats_list],
+            [F.interpolate(f, size=feats_list[0].shape[2:], mode='bilinear', align_corners=False) for f in feats_list],
             dim=1
         )
 
