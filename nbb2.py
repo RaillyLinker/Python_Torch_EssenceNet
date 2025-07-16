@@ -51,7 +51,7 @@ class EssenceNet(nn.Module):
         encoder_input = sum([conv[-4].out_channels for conv in self.feats_convs])
 
         # 인코더 헤드
-        self.encoder_output = 1080
+        self.encoder_output = 1280
         self.encoder_head = nn.Sequential(
             nn.Conv2d(encoder_input, self.encoder_output, kernel_size=1, bias=False),
             nn.BatchNorm2d(self.encoder_output),
