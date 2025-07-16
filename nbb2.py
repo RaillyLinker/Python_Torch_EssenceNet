@@ -31,6 +31,26 @@ def _double_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, dp, bs):
     )
 
 
+def _mb_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, dp, bs):
+    return nn.Sequential(
+        nn.Conv2d(in_ch, mid_ch, kernel_size=1, stride=1, padding=0, bias=False),
+        nn.BatchNorm2d(mid_ch),
+        nn.SiLU(),
+
+        # 평면당 형태를 파악
+        nn.Conv2d(mid_ch, mid_ch, kernel_size=ks, stride=strd, padding=pdd, groups=mid_ch, bias=False),
+        nn.BatchNorm2d(mid_ch),
+        nn.SiLU(),
+
+        # 픽셀별 의미 추출(희소한 특징 압축)
+        nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
+        nn.BatchNorm2d(out_ch),
+        nn.SiLU(),
+
+        DropBlock2D(drop_prob=dp, block_size=bs)
+    )
+
+
 # (EssenceNet 백본)
 class EssenceNet(nn.Module):
     def __init__(self):
@@ -40,11 +60,11 @@ class EssenceNet(nn.Module):
             _single_conv_block(3, 32, 3, 2, 1, 0.0, 1),  # 320x320 -> 160x160
             _double_conv_block(32, 96, 48, 3, 2, 1, 0.05, 3),  # 160x160 -> 80x80
             _double_conv_block(48, 128, 64, 3, 2, 1, 0.10, 3),  # 80x80 -> 40x40
-            _double_conv_block(64, 192, 96, 3, 2, 1, 0.15, 5),  # 40x40 -> 20x20
-            _double_conv_block(96, 256, 128, 3, 2, 1, 0.20, 5),  # 20x20 -> 10x10
-            _double_conv_block(128, 384, 192, 3, 2, 1, 0.20, 3),  # 10x10 -> 5x5
-            _double_conv_block(192, 512, 256, 3, 2, 1, 0.15, 3),  # 5x5 -> 3x3
-            _double_conv_block(256, 768, 384, 3, 1, 0, 0.0, 1)  # 3x3 -> 1x1
+            _mb_conv_block(64, 192, 96, 3, 2, 1, 0.15, 5),  # 40x40 -> 20x20
+            _mb_conv_block(96, 256, 128, 3, 2, 1, 0.20, 5),  # 20x20 -> 10x10
+            _mb_conv_block(128, 384, 192, 3, 2, 1, 0.20, 3),  # 10x10 -> 5x5
+            _mb_conv_block(192, 512, 256, 3, 2, 1, 0.15, 3),  # 5x5 -> 3x3
+            _mb_conv_block(256, 768, 384, 3, 1, 0, 0.0, 1)  # 3x3 -> 1x1
         ])
 
         # 특징맵 피라미드 채널 수
