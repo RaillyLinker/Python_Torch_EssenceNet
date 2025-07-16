@@ -19,8 +19,8 @@ import math
 import shutil
 import matplotlib.pyplot as plt
 import time
+from sklearn.metrics import confusion_matrix
 from nbb2 import EssenceNetSegmenter
-from torchmetrics import JaccardIndex
 
 PRETRAINED_MODEL_PATH = None
 NUM_CLASSES = 150  # ADE20K number of classes
@@ -30,7 +30,6 @@ LOG_DIR = "runs/ade_exp"
 CHECKPOINT_DIR = "checkpoints"
 INPUT_SIZE = 320
 SEED = 42
-
 torch.manual_seed(SEED)
 random.seed(SEED)
 np.random.seed(SEED)
@@ -39,7 +38,21 @@ if torch.cuda.is_available():
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-miou_metric = JaccardIndex(task="multiclass", num_classes=NUM_CLASSES, ignore_index=255)
+
+def calculate_miou(y_pred, y_true, num_classes, ignore_index=255, return_iou=False):
+    y_pred = y_pred.view(-1)
+    y_true = y_true.view(-1)
+    mask = y_true != ignore_index
+    y_pred = y_pred[mask]
+    y_true = y_true[mask]
+
+    conf_matrix = confusion_matrix(y_true.cpu().numpy(), y_pred.cpu().numpy(), labels=list(range(num_classes)))
+    intersection = np.diag(conf_matrix)
+    union = conf_matrix.sum(1) + conf_matrix.sum(0) - intersection
+    iou = np.where(union > 0, intersection / (union + 1e-10), np.nan)
+    miou = np.nanmean(iou) if np.any(~np.isnan(iou)) else 0.0
+
+    return (miou, iou) if return_iou else miou
 
 
 def apply_ade_transform_batch(batch, mode: str):
@@ -208,9 +221,8 @@ def eval_epoch(model, loader, device, criterion_fn, writer=None, epoch=None):
     start_time = time.time()
     first_batch_saved = False
 
-    miou_metric.reset()
     with torch.no_grad():
-        for batch in loader:
+        for batch_idx, batch in enumerate(tqdm(loader, desc='Val', leave=False)):
             imgs = batch['pixel_values'].to(device)
             masks = batch['labels'].to(device)
             outputs = model(imgs)
@@ -222,7 +234,6 @@ def eval_epoch(model, loader, device, criterion_fn, writer=None, epoch=None):
             running_loss += loss.item() * imgs.size(0)
 
             preds = torch.argmax(outputs, dim=1)
-            miou_metric.update(preds, masks)
             valid_mask = masks != 255
             correct_pixels += (preds[valid_mask] == masks[valid_mask]).sum().item()
             total_pixels += valid_mask.sum().item()
@@ -264,7 +275,11 @@ def eval_epoch(model, loader, device, criterion_fn, writer=None, epoch=None):
 
     avg_loss = running_loss / len(loader.dataset)
     accuracy = correct_pixels / total_pixels if total_pixels > 0 else 0.0
-    miou = miou_metric.compute().item()
+    miou = calculate_miou(
+        torch.cat(all_preds).reshape(-1),
+        torch.cat(all_targets).reshape(-1),
+        NUM_CLASSES
+    )
 
     print(f"Val Epoch Time: {elapsed:.2f}s | Samples/sec: {samples_per_sec:.2f}")
 
@@ -283,7 +298,6 @@ def main():
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     use_amp = (device.type == 'cuda')
-    miou_metric.to(device)
 
     ds = load_dataset("scene_parse_150", trust_remote_code=True)
 
