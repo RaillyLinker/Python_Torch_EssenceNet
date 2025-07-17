@@ -158,10 +158,12 @@ def train_epoch(model, loader, optimizer, device, scaler, writer, epoch, amp_ctx
         imgs, masks = batch['pixel_values'].to(device), batch['labels'].to(device)
         optimizer.zero_grad()
         with amp_ctx:
-            torch.cuda.synchronize() if device.type == 'cuda' else None
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
             t0 = time.time()
             outputs = model(imgs)
-            torch.cuda.synchronize() if device.type == 'cuda' else None
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
             t1 = time.time()
             inference_times.append(t1 - t0)
             if outputs.shape[-2:] != masks.shape[-2:]:
@@ -203,10 +205,12 @@ def eval_epoch(model, loader, device, writer, epoch, confmat):
             imgs = batch['pixel_values'].to(device)
             masks = batch['labels'].to(device)
 
-            torch.cuda.synchronize() if device.type == 'cuda' else None
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
             t0 = time.time()
             outputs = model(imgs)
-            torch.cuda.synchronize() if device.type == 'cuda' else None
+            if device.type == 'cuda':
+                torch.cuda.synchronize()
             t1 = time.time()
 
             inference_times.append(t1 - t0)
@@ -233,20 +237,20 @@ def eval_epoch(model, loader, device, writer, epoch, confmat):
     union = cm.sum(1).double() + cm.sum(0).double() - inter
     miou = torch.nanmean(inter / (union + 1e-10)).item()
 
-    avg_infer_time = np.mean(inference_times)
-    avg_fps = 1.0 / avg_infer_time if avg_infer_time > 0 else 0
+    avg_infer_time_per_batch = np.mean(inference_times)
+    avg_fps = BATCH_SIZE / avg_infer_time_per_batch
 
     # TensorBoard 로그
     writer.add_scalar('Loss/val', avg_loss, epoch)
     writer.add_scalar('Accuracy/val', acc, epoch)
     writer.add_scalar('mIoU/val', miou, epoch)
     writer.add_scalar('Time/val_epoch', elapsed, epoch)
-    writer.add_scalar('Time/val_infer_avg', avg_infer_time, epoch)
+    writer.add_scalar('Time/val_infer_avg', avg_infer_time_per_batch, epoch)
     writer.add_scalar('FPS/val', avg_fps, epoch)
 
     print(f"Val   {epoch}: Loss={avg_loss:.4f}, Acc={acc * 100:.2f}%, "
           f"mIoU={miou * 100:.2f}%, Time={elapsed:.2f}s, "
-          f"InferTime={avg_infer_time * 1000:.2f}ms, FPS={avg_fps:.2f}")
+          f"InferTime={avg_infer_time_per_batch * 1000:.2f}ms, FPS={avg_fps:.2f}")
     return avg_loss, acc, miou
 
 
