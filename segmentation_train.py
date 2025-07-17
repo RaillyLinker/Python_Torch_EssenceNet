@@ -18,7 +18,7 @@ import math
 import shutil
 import time
 from torchmetrics import ConfusionMatrix
-from nbb2 import EssenceNetSegmenter
+from segmentation_nbb import EssenceNetSegmenter
 from contextlib import nullcontext
 
 # todo : 헤드만 변경해서 다른 데이터셋도 변경
