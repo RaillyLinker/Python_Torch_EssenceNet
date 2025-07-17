@@ -34,36 +34,16 @@ class EssenceNet(nn.Module):
     def __init__(self):
         super().__init__()
 
-        # todo : PE 를 반영해보기
         self.feats_convs = nn.ModuleList([
-            _single_conv_block(3, 32, 3, 2, 1),  # 320x320 -> 160x160
-            _double_conv_block(32, 96, 48, 3, 2, 1, 0.05, 3),  # 160x160 -> 80x80
-            _double_conv_block(48, 128, 64, 3, 2, 1, 0.10, 3),  # 80x80 -> 40x40
-            _double_conv_block(64, 192, 96, 3, 2, 1, 0.15, 5),  # 40x40 -> 20x20
-            _double_conv_block(96, 256, 128, 3, 2, 1, 0.20, 5),  # 20x20 -> 10x10
-            _double_conv_block(128, 384, 192, 3, 2, 1, 0.20, 3),  # 10x10 -> 5x5
-            _double_conv_block(192, 512, 256, 3, 2, 1, 0.15, 3),  # 5x5 -> 3x3
-            _double_conv_block(256, 768, 384, 3, 1, 0, 0.0, 1)  # 3x3 -> 1x1
+            _single_conv_block(3, 24, 3, 2, 1),  # 320x320 -> 160x160
+            _double_conv_block(24, 64, 32, 3, 2, 1, 0.05, 3),  # 160x160 -> 80x80
+            _double_conv_block(32, 96, 48, 3, 2, 1, 0.10, 3),  # 80x80 -> 40x40
+            _double_conv_block(48, 128, 64, 3, 2, 1, 0.15, 5),  # 40x40 -> 20x20
+            _double_conv_block(64, 192, 96, 3, 2, 1, 0.20, 5),  # 20x20 -> 10x10
+            _double_conv_block(96, 256, 128, 3, 2, 1, 0.20, 3),  # 10x10 -> 5x5
+            _double_conv_block(128, 384, 192, 3, 2, 1, 0.15, 3),  # 5x5 -> 3x3
+            _double_conv_block(192, 512, 256, 3, 1, 0, 0.0, 1)  # 3x3 -> 1x1
         ])
-
-        # todo : 특징이 아니라 입력 이미지만 한번에 축소해놓고 잔차 더하기
-        # feats_convs 를 기반으로 projection 레이어 자동 생성
-        self.projections = nn.ModuleList()
-        prev_out_ch = 3  # 입력 이미지 채널 (RGB)
-        for conv_block in self.feats_convs:
-            conv_layers = [layer for layer in conv_block.modules() if isinstance(layer, nn.Conv2d)]
-            last_conv = conv_layers[-1]
-            out_ch = last_conv.out_channels
-
-            self.projections.append(
-                nn.Sequential(
-                    nn.Conv2d(prev_out_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
-                    nn.BatchNorm2d(out_ch),
-                    nn.SiLU()
-                )
-            )
-
-            prev_out_ch = out_ch
 
         # 특징맵 피라미드 채널 수
         def get_last_conv_out_channels(block: nn.Module) -> int:
@@ -93,24 +73,14 @@ class EssenceNet(nn.Module):
 
         feat = x
         for idx, conv in enumerate(self.feats_convs):
-            # # Residual 용 특징 저장
-            identity = feat
-
             # Conv 연산
             feat = conv(feat)
-
-            # Residual 해상도 맞추기
-            identity = F.interpolate(identity, size=feat.shape[2:], mode='area')
-
-            # Residual 채널 맞추기
-            projected = self.projections[idx](identity)
-
-            # Residual 합치기
-            feat = feat + projected
 
             # 특징 저장
             feats_list.append(feat)
 
+        # todo : 너무 정직한 구조로 concat 하지 말고, 피쳐 피라미드를 업샘플링 하지 않고 단일 벡터로 표현 및 압축 가능하게 녹이기
+        #   PE 를 적용하는 것도 괜찮을듯...
         # 특징맵 피라미드들을 최고 해상도 기준으로 합치기
         concat_feats = torch.cat(
             [F.interpolate(f, size=feats_list[0].shape[2:], mode='nearest') for f in feats_list],
