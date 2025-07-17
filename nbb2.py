@@ -4,12 +4,17 @@ import torch.nn.functional as F
 from dropblock import DropBlock2D
 
 
+class Swish(nn.Module):
+    def forward(self, x):
+        return x * torch.sigmoid(x)
+
+
 def _single_conv_block(in_ch, out_ch, ks, strd, pdd):
     return nn.Sequential(
         # 평면당 형태를 파악
         nn.Conv2d(in_ch, out_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
         nn.BatchNorm2d(out_ch),
-        nn.SiLU()
+        Swish()
     )
 
 
@@ -18,12 +23,12 @@ def _double_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, dp, bs):
         # 평면당 형태를 파악
         nn.Conv2d(in_ch, mid_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
         nn.BatchNorm2d(mid_ch),
-        nn.SiLU(),
+        Swish(),
 
         # 픽셀별 의미 추출(희소한 특징 압축)
         nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
         nn.BatchNorm2d(out_ch),
-        nn.SiLU(),
+        Swish(),
 
         DropBlock2D(drop_prob=dp, block_size=bs)
     )
@@ -62,7 +67,7 @@ class EssenceNet(nn.Module):
         self.encoder_head = nn.Sequential(
             nn.Conv2d(encoder_input, self.encoder_output, kernel_size=1, bias=False),
             nn.BatchNorm2d(self.encoder_output),
-            nn.SiLU(),
+            Swish(),
 
             nn.Dropout2d(0.2)
         )
@@ -79,8 +84,6 @@ class EssenceNet(nn.Module):
             # 특징 저장
             feats_list.append(feat)
 
-        # todo : 너무 정직한 구조로 concat 하지 말고, 피쳐 피라미드를 업샘플링 하지 않고 단일 벡터로 표현 및 압축 가능하게 녹이기
-        #   PE 를 적용하는 것도 괜찮을듯...
         # 특징맵 피라미드들을 최고 해상도 기준으로 합치기
         concat_feats = torch.cat(
             [F.interpolate(f, size=feats_list[0].shape[2:], mode='nearest') for f in feats_list],
@@ -106,7 +109,7 @@ class EssenceNetSegmenter(nn.Module):
         self.classifier_head = nn.Sequential(
             nn.Conv2d(backbone_output_ch, hidden, kernel_size=1, bias=False),
             nn.BatchNorm2d(hidden),
-            nn.SiLU(),
+            Swish(),
 
             nn.Dropout2d(0.2),
 
