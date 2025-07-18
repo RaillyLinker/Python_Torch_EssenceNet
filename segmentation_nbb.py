@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from dropblock import DropBlock2D
 
 
+# todo : 다음 실험 : Swish 사용해보기 -> 나아지는게 있고 실용성 없으면 Swish 적용 및 conv 증량
 class Swish(nn.Module):
     def forward(self, x):
         return x * torch.sigmoid(x)
@@ -25,7 +26,7 @@ def _double_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, dp, bs):
         nn.BatchNorm2d(mid_ch),
         nn.ReLU(),
 
-        # 픽셀별 의미 추출(희소한 특징 압축)
+        # 픽셀별 의미 Projection(희소한 특징 압축)
         nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
         nn.BatchNorm2d(out_ch),
         nn.ReLU(),
@@ -67,7 +68,7 @@ class EssenceNet(nn.Module):
         # 인코더 헤드
         self.encoder_output = 1280
         self.encoder_head = nn.Sequential(
-            nn.Conv2d(encoder_input, self.encoder_output, kernel_size=1, bias=False),
+            nn.Conv2d(encoder_input + 3, self.encoder_output, kernel_size=1, bias=False),
             nn.BatchNorm2d(self.encoder_output),
             nn.ReLU(),
 
@@ -78,9 +79,10 @@ class EssenceNet(nn.Module):
         assert x.shape[1] == 3, "Input tensor must have 3 channels (RGB)."
         feats_list = []
 
-        # 순수 하게 CNN 형태 분석을 위한 흑백 변환
+        # 순수한 형태 분석을 위한 흑백 변환
         gray_feats = (x * self.rgb2gray.to(x.device, x.dtype)).sum(dim=1, keepdim=True)
 
+        # conv 형태 분석
         feat = gray_feats
         for idx, conv in enumerate(self.feats_convs):
             # Conv 연산
@@ -89,17 +91,20 @@ class EssenceNet(nn.Module):
             # 특징 저장
             feats_list.append(feat)
 
-        # 특징맵 피라미드들을 최고 해상도 기준으로 합치기
-        concat_feats = torch.cat(
+        # 특징맵 피라미드들을 최고 해상도 기준으로 업샘플링 후 합치기
+        shape_feats = torch.cat(
             [F.interpolate(f, size=feats_list[0].shape[2:], mode='nearest') for f in feats_list],
             dim=1
         )
 
-        shape_feats = self.encoder_head(concat_feats)
+        # 색 특징 다운 샘플링
+        color_feats = F.adaptive_avg_pool2d(x, output_size=shape_feats.shape[2:])
 
-        # 색 특징이 필요 하면 shape_feats 에 컬러 채널 추가
+        # 색 특징 + 형태 특징 결합
+        concat_feats = torch.cat([color_feats, shape_feats], dim=1)
 
-        return shape_feats
+        # 이미지 특징 최종 Projection
+        return self.encoder_head(concat_feats)
 
 
 # ----------------------------------------------------------------------------------------------------------------------
