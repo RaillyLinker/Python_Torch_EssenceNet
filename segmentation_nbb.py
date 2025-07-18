@@ -14,7 +14,7 @@ def _single_conv_block(in_ch, out_ch, ks, strd, pdd):
         # 평면당 형태를 파악
         nn.Conv2d(in_ch, out_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
         nn.BatchNorm2d(out_ch),
-        Swish()
+        nn.ReLU()
     )
 
 
@@ -23,12 +23,12 @@ def _double_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, dp, bs):
         # 평면당 형태를 파악
         nn.Conv2d(in_ch, mid_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
         nn.BatchNorm2d(mid_ch),
-        Swish(),
+        nn.ReLU(),
 
         # 픽셀별 의미 추출(희소한 특징 압축)
         nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
         nn.BatchNorm2d(out_ch),
-        Swish(),
+        nn.ReLU(),
 
         DropBlock2D(drop_prob=dp, block_size=bs)
     )
@@ -39,8 +39,10 @@ class EssenceNet(nn.Module):
     def __init__(self):
         super().__init__()
 
+        self.register_buffer("rgb2gray", torch.tensor([0.299, 0.587, 0.114]).view(1, 3, 1, 1))
+
         self.feats_convs = nn.ModuleList([
-            _single_conv_block(3, 16, 3, 2, 1),  # 320x320 -> 160x160
+            _single_conv_block(1, 16, 3, 2, 1),  # 320x320 -> 160x160
             _double_conv_block(16, 48, 24, 3, 2, 1, 0.05, 3),  # 160x160 -> 80x80
             _double_conv_block(24, 64, 32, 3, 2, 1, 0.10, 3),  # 80x80 -> 40x40
             _double_conv_block(32, 96, 48, 3, 2, 1, 0.15, 5),  # 40x40 -> 20x20
@@ -67,7 +69,7 @@ class EssenceNet(nn.Module):
         self.encoder_head = nn.Sequential(
             nn.Conv2d(encoder_input, self.encoder_output, kernel_size=1, bias=False),
             nn.BatchNorm2d(self.encoder_output),
-            Swish(),
+            nn.ReLU(),
 
             nn.Dropout2d(0.2)
         )
@@ -76,7 +78,10 @@ class EssenceNet(nn.Module):
         assert x.shape[1] == 3, "Input tensor must have 3 channels (RGB)."
         feats_list = []
 
-        feat = x
+        # 순수 하게 CNN 형태 분석을 위한 흑백 변환
+        gray_feats = (x * self.rgb2gray.to(x.device, x.dtype)).sum(dim=1, keepdim=True)
+
+        feat = gray_feats
         for idx, conv in enumerate(self.feats_convs):
             # Conv 연산
             feat = conv(feat)
@@ -90,7 +95,11 @@ class EssenceNet(nn.Module):
             dim=1
         )
 
-        return self.encoder_head(concat_feats)
+        shape_feats = self.encoder_head(concat_feats)
+
+        # 색 특징이 필요 하면 shape_feats 에 컬러 채널 추가
+
+        return shape_feats
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -109,7 +118,7 @@ class EssenceNetSegmenter(nn.Module):
         self.classifier_head = nn.Sequential(
             nn.Conv2d(backbone_output_ch, hidden, kernel_size=1, bias=False),
             nn.BatchNorm2d(hidden),
-            Swish(),
+            nn.ReLU(),
 
             nn.Dropout2d(0.2),
 
