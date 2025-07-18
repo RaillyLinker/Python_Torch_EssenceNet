@@ -80,7 +80,7 @@ class EssenceNet(nn.Module):
         feats_list = []
 
         # 순수한 형태 분석을 위한 흑백 변환
-        gray_feats = (x * self.rgb2gray.to(x.device, x.dtype)).sum(dim=1, keepdim=True)
+        gray_feats = (x * self.rgb2gray).sum(dim=1, keepdim=True)
 
         # conv 형태 분석
         feat = gray_feats
@@ -91,17 +91,14 @@ class EssenceNet(nn.Module):
             # 특징 저장
             feats_list.append(feat)
 
-        # 특징맵 피라미드들을 최고 해상도 기준으로 업샘플링 후 합치기
-        shape_feats = torch.cat(
-            [F.interpolate(f, size=feats_list[0].shape[2:], mode='nearest') for f in feats_list],
-            dim=1
-        )
+        # 특징맵 피라미드 업샘플링
+        shape_feats = [F.interpolate(f, size=feats_list[0].shape[2:], mode='nearest') for f in feats_list]
 
         # 색 특징 다운 샘플링
-        color_feats = F.adaptive_avg_pool2d(x, output_size=shape_feats.shape[2:])
+        color_feats = F.adaptive_avg_pool2d(x, output_size=(shape_feats[0].shape[2], shape_feats[0].shape[3]))
 
         # 색 특징 + 형태 특징 결합
-        concat_feats = torch.cat([color_feats, shape_feats], dim=1)
+        concat_feats = torch.cat([color_feats, *shape_feats], dim=1)
 
         # 이미지 특징 최종 Projection
         return self.encoder_head(concat_feats)
