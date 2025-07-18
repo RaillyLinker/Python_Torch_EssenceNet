@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from dropblock import DropBlock2D
 
 
-# todo : 다음 실험 : Swish 사용해보기 -> 나아지는게 있고 실용성 없으면 Swish 적용 및 conv 증량
+# todo : 다음 실험 :  conv 증량
 class Swish(nn.Module):
     def forward(self, x):
         return x * torch.sigmoid(x)
@@ -15,7 +15,7 @@ def _single_conv_block(in_ch, out_ch, ks, strd, pdd):
         # 평면당 형태를 파악
         nn.Conv2d(in_ch, out_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
         nn.BatchNorm2d(out_ch),
-        nn.ReLU()
+        Swish()
     )
 
 
@@ -24,12 +24,12 @@ def _double_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, dp, bs):
         # 평면당 형태를 파악
         nn.Conv2d(in_ch, mid_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
         nn.BatchNorm2d(mid_ch),
-        nn.ReLU(),
+        Swish(),
 
         # 픽셀별 의미 Projection(희소한 특징 압축)
         nn.Conv2d(mid_ch, out_ch, kernel_size=1, stride=1, padding=0, bias=False),
         nn.BatchNorm2d(out_ch),
-        nn.ReLU(),
+        Swish(),
 
         DropBlock2D(drop_prob=dp, block_size=bs)
     )
@@ -40,7 +40,11 @@ class EssenceNet(nn.Module):
     def __init__(self):
         super().__init__()
 
-        self.register_buffer("rgb2gray", torch.tensor([0.299, 0.587, 0.114]).view(1, 3, 1, 1))
+        self.to_gray = nn.Sequential(
+            # 평면당 형태를 파악
+            nn.Conv2d(3, 1, kernel_size=1, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(1)
+        )
 
         self.feats_convs = nn.ModuleList([
             _single_conv_block(1, 16, 3, 2, 1),  # 320x320 -> 160x160
@@ -70,7 +74,7 @@ class EssenceNet(nn.Module):
         self.encoder_head = nn.Sequential(
             nn.Conv2d(encoder_input + 3, self.encoder_output, kernel_size=1, bias=False),
             nn.BatchNorm2d(self.encoder_output),
-            nn.ReLU(),
+            Swish(),
 
             nn.Dropout2d(0.2)
         )
@@ -80,7 +84,7 @@ class EssenceNet(nn.Module):
         feats_list = []
 
         # 순수한 형태 분석을 위한 흑백 변환
-        gray_feats = (x * self.rgb2gray).sum(dim=1, keepdim=True)
+        gray_feats = self.to_gray(x)
 
         # conv 형태 분석
         feat = gray_feats
@@ -120,7 +124,7 @@ class EssenceNetSegmenter(nn.Module):
         self.classifier_head = nn.Sequential(
             nn.Conv2d(backbone_output_ch, hidden, kernel_size=1, bias=False),
             nn.BatchNorm2d(hidden),
-            nn.ReLU(),
+            Swish(),
 
             nn.Dropout2d(0.2),
 
