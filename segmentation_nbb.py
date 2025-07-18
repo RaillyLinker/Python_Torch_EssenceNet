@@ -40,14 +40,14 @@ class EssenceNet(nn.Module):
         super().__init__()
 
         self.feats_convs = nn.ModuleList([
-            _single_conv_block(3, 12, 3, 2, 1),  # 320x320 -> 160x160
-            _double_conv_block(12, 32, 16, 3, 2, 1, 0.05, 3),  # 160x160 -> 80x80
-            _double_conv_block(16, 48, 24, 3, 2, 1, 0.10, 3),  # 80x80 -> 40x40
-            _double_conv_block(24, 64, 32, 3, 2, 1, 0.15, 5),  # 40x40 -> 20x20
-            _double_conv_block(32, 96, 48, 3, 2, 1, 0.20, 5),  # 20x20 -> 10x10
-            _double_conv_block(48, 128, 64, 3, 2, 1, 0.20, 3),  # 10x10 -> 5x5
-            _double_conv_block(64, 192, 96, 3, 2, 1, 0.15, 3),  # 5x5 -> 3x3
-            _double_conv_block(96, 256, 128, 3, 1, 0, 0.0, 1)  # 3x3 -> 1x1
+            _single_conv_block(3, 16, 3, 2, 1),  # 320x320 -> 160x160
+            _double_conv_block(16, 48, 24, 3, 2, 1, 0.05, 3),  # 160x160 -> 80x80
+            _double_conv_block(24, 64, 32, 3, 2, 1, 0.10, 3),  # 80x80 -> 40x40
+            _double_conv_block(32, 96, 48, 3, 2, 1, 0.15, 5),  # 40x40 -> 20x20
+            _double_conv_block(48, 128, 64, 3, 2, 1, 0.20, 5),  # 20x20 -> 10x10
+            _double_conv_block(64, 192, 96, 3, 2, 1, 0.20, 3),  # 10x10 -> 5x5
+            _double_conv_block(96, 256, 128, 3, 2, 1, 0.15, 3),  # 5x5 -> 3x3
+            _double_conv_block(128, 384, 192, 3, 1, 0, 0.0, 1)  # 3x3 -> 1x1
         ])
 
         # 특징맵 피라미드 채널 수
