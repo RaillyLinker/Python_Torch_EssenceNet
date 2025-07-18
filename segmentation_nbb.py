@@ -41,32 +41,22 @@ class EssenceNet(nn.Module):
 
         # todo : 증량해보기
         self.feats_convs = nn.ModuleList([
-            _single_conv_block(3, 16, 3, 2, 1),  # 320x320 -> 160x160
-            _double_conv_block(16, 48, 24, 3, 2, 1, 0.05, 3),  # 160x160 -> 80x80
-            _double_conv_block(24, 64, 32, 3, 2, 1, 0.10, 3),  # 80x80 -> 40x40
-            _double_conv_block(32, 96, 48, 3, 2, 1, 0.15, 5),  # 40x40 -> 20x20
-            _double_conv_block(48, 128, 64, 3, 2, 1, 0.20, 5),  # 20x20 -> 10x10
-            _double_conv_block(64, 192, 96, 3, 2, 1, 0.20, 3),  # 10x10 -> 5x5
-            _double_conv_block(96, 256, 128, 3, 2, 1, 0.15, 3),  # 5x5 -> 3x3
-            _double_conv_block(128, 384, 192, 3, 1, 0, 0.0, 1)  # 3x3 -> 1x1
+            _single_conv_block(3, 32, 3, 2, 1),  # 320x320 -> 160x160
+            _double_conv_block(32, 96, 48, 3, 2, 1, 0.05, 3),  # 160x160 -> 80x80
+            _double_conv_block(48, 128, 64, 3, 2, 1, 0.10, 3),  # 80x80 -> 40x40
+            _double_conv_block(64, 192, 96, 3, 2, 1, 0.15, 5),  # 40x40 -> 20x20
+            _double_conv_block(96, 256, 128, 3, 2, 1, 0.20, 5),  # 20x20 -> 10x10
+            _double_conv_block(128, 384, 192, 3, 2, 1, 0.20, 3),  # 10x10 -> 5x5
+            _double_conv_block(192, 512, 256, 3, 2, 1, 0.15, 3),  # 5x5 -> 3x3
+            _double_conv_block(256, 768, 384, 3, 1, 0, 0.0, 1)  # 3x3 -> 1x1
         ])
 
         # 특징맵 피라미드 채널 수
-        encoder_input = sum([
+        self.output_ch = sum([
             (lambda block: next(
                 layer.out_channels for layer in reversed(list(block.children())) if isinstance(layer, nn.Conv2d)))(conv)
             for conv in self.feats_convs
         ])
-
-        # 인코더 헤드
-        self.encoder_output = 1280
-        self.encoder_head = nn.Sequential(
-            nn.Conv2d(encoder_input, self.encoder_output, kernel_size=1, bias=False),
-            nn.BatchNorm2d(self.encoder_output),
-            Swish(),
-
-            nn.Dropout2d(0.2)
-        )
 
     def forward(self, x):
         assert x.shape[1] == 3, "Input tensor must have 3 channels (RGB)."
@@ -81,15 +71,15 @@ class EssenceNet(nn.Module):
             # 특징 저장
             feats_list.append(feat)
 
-        # TODO : 합치며 역순으로 1x1 conv 돌려보기(FPN 처럼)
         # 특징맵 피라미드 업샘플링 및 결합
         concat_feats = torch.cat(
             [F.interpolate(f, size=feats_list[0].shape[2:], mode='nearest') for f in feats_list],
             dim=1
         )
 
-        # 이미지 특징 최종 Projection
-        return self.encoder_head(concat_feats)
+        # 이미지의 특징 추출은 여기까지
+        # todo 피라미드 합치기도 다음에 하게 하기
+        return concat_feats
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -101,10 +91,10 @@ class EssenceNetSegmenter(nn.Module):
         self.backbone = EssenceNet()
 
         # 백본 출력 채널
-        backbone_output_ch = self.backbone.encoder_output
+        backbone_output_ch = self.backbone.output_ch
 
         # 분류기 헤드
-        hidden = backbone_output_ch // 2
+        hidden = 1280
         self.classifier_head = nn.Sequential(
             nn.Conv2d(backbone_output_ch, hidden, kernel_size=1, bias=False),
             nn.BatchNorm2d(hidden),
