@@ -11,12 +11,15 @@ class Swish(nn.Module):
 
 
 # 일반 conv 한개의 블록(최초 데이터 형태 특징 추출)
-def _single_conv_block(in_ch, out_ch, ks, strd, pdd):
+def _single_conv_block(in_ch, out_ch, ks, strd, pdd, dp, bs):
     return nn.Sequential(
         # 평면당 형태를 파악
         nn.Conv2d(in_ch, out_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
         nn.BatchNorm2d(out_ch),
-        Swish()
+        Swish(),
+
+        # 오버피팅 방지를 위한 DropBlock
+        DropBlock2D(drop_prob=dp, block_size=bs)
     )
 
 
@@ -43,13 +46,13 @@ class EssenceNet(nn.Module):
     def __init__(self):
         super().__init__()
 
-        # 백본 필요 이미지 형태
+        # 모델 입력 이미지 사이즈
         self.input_img_dim = (3, 320, 320)
 
-        # todo : 증량해보기
+        # todo : 증량해보기, 압축 없애보기
         # 특징맵 레이어(중간 결과물들을 전부 사용하는 특징맵 피라미드 구조)
         self.feats_convs = nn.ModuleList([
-            _single_conv_block(3, 48, 3, 2, 1),  # 320x320 -> 160x160
+            _single_conv_block(3, 48, 3, 2, 1, 0.0, 1),  # 320x320 -> 160x160
             _double_conv_block(48, 128, 64, 3, 2, 1, 0.05, 3),  # 160x160 -> 80x80
             _double_conv_block(64, 192, 96, 3, 2, 1, 0.10, 3),  # 80x80 -> 40x40
             _double_conv_block(96, 256, 128, 3, 2, 1, 0.15, 5),  # 40x40 -> 20x20
@@ -58,6 +61,18 @@ class EssenceNet(nn.Module):
             _double_conv_block(256, 768, 384, 3, 2, 1, 0.15, 3),  # 5x5 -> 3x3
             _double_conv_block(384, 1024, 512, 3, 1, 0, 0.0, 1)  # 3x3 -> 1x1
         ])
+
+        # 모델 출력 특징맵 피라미드 사이즈
+        self.backbone_feat_shapes = [
+            (160, 160, 48),
+            (80, 80, 64),
+            (40, 40, 96),
+            (20, 20, 128),
+            (10, 10, 192),
+            (5, 5, 256),
+            (3, 3, 384),
+            (1, 1, 512),
+        ]
 
     def forward(self, x):
         # 입력 이미지의 크기 및 채널 수 검증
@@ -92,22 +107,11 @@ class EssenceNetSegmenter(nn.Module):
         # 모델 입력 이미지 사이즈
         self.input_img_dim = self.backbone.input_img_dim
 
-        with torch.no_grad():
-            # 백본 출력 형태 파악을 위한 더미 데이터 입력 및 출력값 저장
-            dummy_input = torch.zeros(2, *self.input_img_dim)
-            feats_list = self.backbone(dummy_input)
+        # 모델 출력 특징맵 피라미드 사이즈
+        self.backbone_feat_shapes = self.backbone.backbone_feat_shapes
 
-            # (H, W, C) 형태의 List 로 저장
-            # ex :
-            # [
-            #     (160, 160, 32),   # 첫 번째 conv block 출력: 320x320 -> 160x160, 채널 32
-            #     ...
-            #     (3, 3, 384)       # 마지막 conv block 출력: 3x3 -> 1x1 stride=1 유지, 채널 384 (해상도 약간 다를 수도 있음)
-            # ]
-            self.backbone_feat_shapes = [(f.shape[2], f.shape[3], f.shape[1]) for f in feats_list]
-
-            # 전체 출력 채널 합산
-            backbone_output_ch = sum([shape[2] for shape in self.backbone_feat_shapes])
+        # 전체 출력 채널 합산
+        backbone_output_ch = sum([shape[2] for shape in self.backbone_feat_shapes])
 
         # 분류기 헤드
         hidden = 1280
