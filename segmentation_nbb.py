@@ -118,13 +118,12 @@ class EssenceNetSegmenter(nn.Module):
         # 백본 특징맵 피라미드 추출
         feats_list = self.backbone(x)
 
-        # 특징맵 피라미드 업샘플링 및 결합
+        # 특징맵 피라미드 업샘플링(가장 큰 특징맵 해상도 기준) 및 결합
         concat_feats = torch.cat(
-            [F.interpolate(f, size=self.backbone_feat_shapes[0][:2], mode='nearest') for f in feats_list],
-            dim=1
+            [F.interpolate(f, size=self.backbone_feat_shapes[0][:2], mode='nearest') for f in feats_list], dim=1
         )
 
-        # 픽셀별 분류 헤드 적용
+        # 픽셀 단위 분류 헤드 적용
         logits = self.classifier_head(concat_feats)
 
         # logits 을 입력 이미지 크기로 업샘플링
