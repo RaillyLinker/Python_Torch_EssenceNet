@@ -62,7 +62,7 @@ class EssenceNet(nn.Module):
             _double_conv_block(384, 1024, 512, 3, 1, 0, 0.0, 1)  # 3x3 -> 1x1
         ])
 
-        # 모델 출력 특징맵 피라미드 사이즈
+        # 모델 출력 특징맵 피라미드 사이즈(w, h, ch)
         self.backbone_feat_shapes = [
             (160, 160, 48),
             (80, 80, 64),
