@@ -61,10 +61,9 @@ class EssenceNet(nn.Module):
 
     def forward(self, x):
         # 입력 이미지의 크기 및 채널 수 검증
-        expected_shape = self.input_img_dim
         actual_shape = x.shape[1:]  # (C, H, W)
-        assert actual_shape == expected_shape, \
-            f"Input tensor must have shape {expected_shape}, but got {actual_shape}."
+        assert actual_shape == self.input_img_dim, \
+            f"Input tensor must have shape {self.input_img_dim}, but got {actual_shape}."
 
         # 특징맵 피라미드 리스트
         feats_list = []
@@ -124,10 +123,9 @@ class EssenceNetSegmenter(nn.Module):
 
     def forward(self, x):
         # 입력 이미지의 크기 및 채널 수 검증
-        expected_shape = self.input_img_dim
         actual_shape = x.shape[1:]  # (C, H, W)
-        assert actual_shape == expected_shape, \
-            f"Input tensor must have shape {expected_shape}, but got {actual_shape}."
+        assert actual_shape == self.input_img_dim, \
+            f"Input tensor must have shape {self.input_img_dim}, but got {actual_shape}."
 
         # 백본 특징맵 피라미드 추출
         feats_list = self.backbone(x)
