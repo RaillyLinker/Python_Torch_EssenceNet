@@ -49,23 +49,17 @@ class EssenceNet(nn.Module):
             _double_conv_block(384, 1048, 512, 3, 1, 0, 0.0, 1)  # 3x3 -> 1x1
         ])
 
-        # output shape 계산
-        # ex : [(160, 160, 48), ..., (1, 1, 512)]
-        def compute_output_shape(ihw, ks, strd, pdd):
-            h_out = (ihw[0] + 2 * pdd - ks) // strd + 1
-            w_out = (ihw[1] + 2 * pdd - ks) // strd + 1
-            return h_out, w_out
-
-        h, w = self.input_img_dim[1:]
-        self.backbone_feat_shapes = []
-        for block in self.feats_convs:
-            k = block[0].kernel_size[0]
-            s = block[0].stride[0]
-            p = block[0].padding[0]
-            h, w = compute_output_shape((h, w), k, s, p)
-            conv_layers = [m for m in block.modules() if isinstance(m, nn.Conv2d)]
-            out_ch = conv_layers[-1].out_channels
-            self.backbone_feat_shapes.append((w, h, out_ch))
+        # 외부에 공개할 피쳐 피라미드 shapes
+        self.output_shapes = [
+            (160, 160, 48),
+            (80, 80, 64),
+            (40, 40, 96),
+            (20, 20, 128),
+            (10, 10, 192),
+            (5, 5, 256),
+            (3, 3, 384),
+            (1, 1, 512)
+        ]
 
     def forward(self, x):
         # 특징맵 피라미드 리스트
@@ -92,25 +86,23 @@ class EssenceNetSegmenter(nn.Module):
         # conv 백본 모델
         self.backbone = EssenceNet()
 
-        # 모델 입력 이미지 사이즈
-        self.input_img_dim = self.backbone.input_img_dim
-
-        # 모델 출력 특징맵 피라미드 사이즈
-        # ex : [(160, 160, 48), ..., (1, 1, 512)]
-        self.backbone_feat_shapes = self.backbone.backbone_feat_shapes
-
         # 전체 출력 채널 합산
-        backbone_output_ch = sum([shape[2] for shape in self.backbone_feat_shapes])
+        backbone_output_ch = sum([shape[2] for shape in self.backbone.output_shapes])
+
+        # 업샘플링 기준이 되는 특징 사이즈(= 특징맵 피라미드에서 가장 큰 해상도)
+        self.anchor_feat_size = self.backbone.output_shapes[0][:2]
 
         # 분류기 헤드
         hidden = 1280
         self.classifier_head = nn.Sequential(
+            # 픽셀 특징 Projection
             nn.Conv2d(backbone_output_ch, hidden, kernel_size=1, bias=False),
             nn.BatchNorm2d(hidden),
             Swish(),
 
             nn.Dropout2d(0.2),
 
+            # 픽셀 분류
             nn.Conv2d(hidden, num_classes, kernel_size=1)
         )
 
@@ -118,9 +110,9 @@ class EssenceNetSegmenter(nn.Module):
         # 백본 특징맵 피라미드 추출
         feats_list = self.backbone(x)
 
-        # 특징맵 피라미드 업샘플링(가장 큰 특징맵 해상도 기준) 및 결합
+        # 특징맵 피라미드 업샘플링 및 결합
         concat_feats = torch.cat(
-            [F.interpolate(f, size=self.backbone_feat_shapes[0][:2], mode='nearest') for f in feats_list], dim=1
+            [F.interpolate(f, size=self.anchor_feat_size, mode='nearest') for f in feats_list], dim=1
         )
 
         # 픽셀 단위 분류 헤드 적용
