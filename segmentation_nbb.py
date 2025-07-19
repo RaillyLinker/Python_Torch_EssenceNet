@@ -49,17 +49,17 @@ class EssenceNet(nn.Module):
         # 모델 입력 이미지 사이즈
         self.input_img_dim = (3, 320, 320)
 
-        # todo : 2번째 레이어에서부터 _double_conv_block 사용해보기, 채널 수 변경해보기
+        # todo : 채널 수 변경해보기
         # 특징맵 레이어(중간 결과물들을 전부 사용하는 특징맵 피라미드 구조)
         self.feats_convs = nn.ModuleList([
-            _single_conv_block(3, 48, 3, 2, 1, 0.0, 1),  # 320x320 -> 160x160
-            _single_conv_block(48, 64, 3, 2, 1, 0.05, 3),  # 160x160 -> 80x80
-            _single_conv_block(64, 96, 3, 2, 1, 0.10, 3),  # 80x80 -> 40x40
-            _single_conv_block(96, 128, 3, 2, 1, 0.15, 5),  # 40x40 -> 20x20
-            _single_conv_block(128, 192, 3, 2, 1, 0.20, 5),  # 20x20 -> 10x10
-            _single_conv_block(192, 256, 3, 2, 1, 0.20, 3),  # 10x10 -> 5x5
-            _single_conv_block(256, 384, 3, 2, 1, 0.15, 3),  # 5x5 -> 3x3
-            _single_conv_block(384, 512, 3, 1, 0, 0.0, 1)  # 3x3 -> 1x1
+            _double_conv_block(3, 96, 48, 3, 2, 1, 0.0, 1),  # 320x320 -> 160x160
+            _double_conv_block(48, 128, 64, 3, 2, 1, 0.05, 3),  # 160x160 -> 80x80
+            _double_conv_block(64, 192, 96, 3, 2, 1, 0.10, 3),  # 80x80 -> 40x40
+            _double_conv_block(96, 256, 128, 3, 2, 1, 0.15, 5),  # 40x40 -> 20x20
+            _double_conv_block(128, 384, 192, 3, 2, 1, 0.20, 5),  # 20x20 -> 10x10
+            _double_conv_block(192, 512, 256, 3, 2, 1, 0.20, 3),  # 10x10 -> 5x5
+            _double_conv_block(256, 768, 384, 3, 2, 1, 0.15, 3),  # 5x5 -> 3x3
+            _double_conv_block(384, 1048, 512, 3, 1, 0, 0.0, 1)  # 3x3 -> 1x1
         ])
 
         # output shape 계산
@@ -81,7 +81,9 @@ class EssenceNet(nn.Module):
             s = block[0].stride[0]
             p = block[0].padding[0]
             h, w = compute_output_shape((h, w), k, s, p)
-            self.backbone_feat_shapes.append((w, h, block[0].out_channels))
+            conv_layers = [m for m in block.modules() if isinstance(m, nn.Conv2d)]
+            out_ch = conv_layers[-1].out_channels
+            self.backbone_feat_shapes.append((w, h, out_ch))
 
     def forward(self, x):
         # 입력 이미지의 크기 및 채널 수 검증
