@@ -10,19 +10,6 @@ class Swish(nn.Module):
         return x * torch.sigmoid(x)
 
 
-# 일반 conv 한개의 블록(최초 데이터 형태 특징 추출)
-def _single_conv_block(in_ch, out_ch, ks, strd, pdd, dp, bs):
-    return nn.Sequential(
-        # 평면당 형태를 파악
-        nn.Conv2d(in_ch, out_ch, kernel_size=ks, stride=strd, padding=pdd, bias=False),
-        nn.BatchNorm2d(out_ch),
-        Swish(),
-
-        # 오버피팅 방지를 위한 DropBlock
-        DropBlock2D(drop_prob=dp, block_size=bs)
-    )
-
-
 # 일반 conv + 1x1 conv 블록(형태 특징 추출 후 채널 압축, 의미 projection)
 def _double_conv_block(in_ch, mid_ch, out_ch, ks, strd, pdd, dp, bs):
     return nn.Sequential(
@@ -63,12 +50,7 @@ class EssenceNet(nn.Module):
         ])
 
         # output shape 계산
-        # ex :
-        # [
-        #     (160, 160, 48),
-        #     ...
-        #     (1, 1, 512)
-        # ]
+        # ex : [(160, 160, 48), ..., (1, 1, 512)]
         def compute_output_shape(ihw, ks, strd, pdd):
             h_out = (ihw[0] + 2 * pdd - ks) // strd + 1
             w_out = (ihw[1] + 2 * pdd - ks) // strd + 1
@@ -86,11 +68,6 @@ class EssenceNet(nn.Module):
             self.backbone_feat_shapes.append((w, h, out_ch))
 
     def forward(self, x):
-        # 입력 이미지의 크기 및 채널 수 검증
-        actual_shape = x.shape[1:]  # (C, H, W)
-        assert actual_shape == self.input_img_dim, \
-            f"Input tensor must have shape {self.input_img_dim}, but got {actual_shape}."
-
         # 특징맵 피라미드 리스트
         feats_list = []
 
@@ -119,12 +96,7 @@ class EssenceNetSegmenter(nn.Module):
         self.input_img_dim = self.backbone.input_img_dim
 
         # 모델 출력 특징맵 피라미드 사이즈
-        # ex :
-        # [
-        #     (160, 160, 48),
-        #     ...
-        #     (1, 1, 512)
-        # ]
+        # ex : [(160, 160, 48), ..., (1, 1, 512)]
         self.backbone_feat_shapes = self.backbone.backbone_feat_shapes
 
         # 전체 출력 채널 합산
@@ -143,11 +115,6 @@ class EssenceNetSegmenter(nn.Module):
         )
 
     def forward(self, x):
-        # 입력 이미지의 크기 및 채널 수 검증
-        actual_shape = x.shape[1:]  # (C, H, W)
-        assert actual_shape == self.input_img_dim, \
-            f"Input tensor must have shape {self.input_img_dim}, but got {actual_shape}."
-
         # 백본 특징맵 피라미드 추출
         feats_list = self.backbone(x)
 
@@ -161,6 +128,4 @@ class EssenceNetSegmenter(nn.Module):
         logits = self.classifier_head(concat_feats)
 
         # logits 을 입력 이미지 크기로 업샘플링
-        logits = F.interpolate(logits, size=x.shape[2:], mode='bilinear', align_corners=False)
-
-        return logits
+        return F.interpolate(logits, size=x.shape[2:], mode='bilinear', align_corners=False)
