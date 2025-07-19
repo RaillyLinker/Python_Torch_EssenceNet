@@ -166,8 +166,6 @@ def train_epoch(model, loader, optimizer, device, scaler, writer, epoch, amp_ctx
                 torch.cuda.synchronize()
             t1 = time.time()
             inference_times.append(t1 - t0)
-            if outputs.shape[-2:] != masks.shape[-2:]:
-                outputs = F.interpolate(outputs, size=masks.shape[-2:], mode='bilinear', align_corners=False)
             loss = F.cross_entropy(outputs, masks, ignore_index=255)
         scaler.scale(loss).backward()
         scaler.unscale_(optimizer)
@@ -214,9 +212,6 @@ def eval_epoch(model, loader, device, writer, epoch, confmat):
             t1 = time.time()
 
             inference_times.append(t1 - t0)
-
-            if outputs.shape[-2:] != masks.shape[-2:]:
-                outputs = F.interpolate(outputs, size=masks.shape[-2:], mode='bilinear', align_corners=False)
 
             loss = F.cross_entropy(outputs, masks, ignore_index=255)
             total_loss += loss.item() * imgs.size(0)
